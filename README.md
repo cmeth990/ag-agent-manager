@@ -2,6 +2,8 @@
 
 A Telegram bot that manages a knowledge graph using LangGraph with human-in-the-loop approval for writes.
 
+💰 **Ultra-Low-Cost Setup:** Can run for **~$0.10-1/month** with free tiers! See [COST_GUIDE.md](COST_GUIDE.md) for details.
+
 ## Features
 
 - 🤖 Telegram bot interface for commands

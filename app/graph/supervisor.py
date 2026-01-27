@@ -8,8 +8,13 @@ from app.graph.workers import (
     linker_node,
     writer_node,
     commit_node,
-    handle_reject_node
+    handle_reject_node,
+    query_node
 )
+from app.graph.source_gatherer import source_gatherer_node
+from app.graph.content_fetcher import content_fetcher_node
+from app.graph.domain_scout_worker import domain_scout_node
+from app.graph.parallel_agents import parallel_agents_node
 from app.graph.checkpoint import create_checkpointer
 
 
@@ -63,6 +68,14 @@ def detect_intent(state: AgentState) -> Dict[str, Any]:
         intent = "ingest"
     elif user_input.startswith("/query") or "query" in user_input:
         intent = "query"
+    elif user_input.startswith("/gather") or "gather sources" in user_input or "find sources" in user_input:
+        intent = "gather_sources"
+    elif user_input.startswith("/fetch") or "fetch content" in user_input:
+        intent = "fetch_content"
+    elif user_input.startswith("/scout") or "scout domains" in user_input or "find new domains" in user_input:
+        intent = "scout_domains"
+    elif user_input.startswith("/test") or "test agents" in user_input or "parallel" in user_input:
+        intent = "parallel_test"
     elif user_input.startswith("/help"):
         intent = "help"
     elif user_input.startswith("/status"):
@@ -83,12 +96,18 @@ def help_node(state: AgentState) -> Dict[str, Any]:
 Commands:
 /ingest <topic=...> - Ingest new knowledge
 /query <question> - Query the knowledge graph
+/gather sources for <domain> - Discover sources for a domain
+/fetch content for <domain> - Fetch content from discovered sources
+/scout domains - Discover new domains not in knowledge graph
+/test agents - Run source gatherer and domain scout in parallel
 /status - Check bot status
 /cancel - Cancel current operation
 /help - Show this help
 
-Example:
+Examples:
 /ingest topic=photosynthesis
+/gather sources for Algebra
+/gather sources for Machine Learning
 """
     return {"final_response": help_text}
 
@@ -152,6 +171,21 @@ def build_graph():
     # Set entry point
     workflow.set_entry_point("detect_intent")
     
+    # Add query node
+    workflow.add_node("query", query_node)
+    
+    # Add source gatherer node
+    workflow.add_node("gather_sources", source_gatherer_node)
+    
+    # Add content fetcher node
+    workflow.add_node("fetch_content", content_fetcher_node)
+    
+    # Add domain scout node
+    workflow.add_node("scout_domains", domain_scout_node)
+    
+    # Add parallel agents node
+    workflow.add_node("parallel_test", parallel_agents_node)
+    
     # Add conditional edges from detect_intent
     def route_after_intent(state: AgentState) -> str:
         intent = state.get("intent")
@@ -161,14 +195,25 @@ def build_graph():
             return "status"
         elif intent == "cancel":
             return "cancel"
+        elif intent == "gather_sources":
+            return "gather_sources"
+        elif intent == "fetch_content":
+            return "fetch_content"
+        elif intent == "scout_domains":
+            return "scout_domains"
+        elif intent == "parallel_test":
+            return "parallel_test"
         elif intent == "ingest":
             return "extract"
+        elif intent == "query":
+            return "query"
         else:
             return END
     
     workflow.add_conditional_edges("detect_intent", route_after_intent)
     
     # Linear flow: extract -> link -> write
+    # Note: extract and link are async, but LangGraph handles this
     workflow.add_edge("extract", "link")
     workflow.add_edge("link", "write")
     
@@ -184,6 +229,11 @@ def build_graph():
     workflow.add_edge("help", END)
     workflow.add_edge("status", END)
     workflow.add_edge("cancel", END)
+    workflow.add_edge("query", END)
+    workflow.add_edge("gather_sources", END)
+    workflow.add_edge("fetch_content", END)
+    workflow.add_edge("scout_domains", END)
+    workflow.add_edge("parallel_test", END)
     
     # Compile with checkpointer
     graph = workflow.compile(checkpointer=checkpointer)

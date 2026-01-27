@@ -1,35 +1,248 @@
 """Worker nodes for LangGraph processing pipeline."""
 import logging
+import json
+import uuid
 from typing import Dict, Any
 from app.graph.state import AgentState
 from app.kg.diff import create_diff_id, create_empty_diff, format_diff_summary
+from app.kg.knowledge_base import (
+    NODE_TYPES, EDGE_TYPES, generate_id, validate_id, get_node_type_from_id,
+    SCHEMA_SUMMARY, KG_STATE, ORP_SCALES, CATEGORY_TAXONOMY_AVAILABLE
+)
+from app.kg.hypernode import (
+    detect_orp_pattern, infer_scale_from_content, create_orp_structure
+)
+
+# Import category functions if available
+if CATEGORY_TAXONOMY_AVAILABLE:
+    from app.kg.categories import (
+        get_category_by_domain, get_upper_ontology_by_category, get_orp_role_by_category
+    )
+else:
+    def get_category_by_domain(domain_name: str) -> str | None:
+        return None
+    def get_upper_ontology_by_category(category_key: str) -> str | None:
+        return None
+    def get_orp_role_by_category(category_key: str) -> str | None:
+        return None
+from app.llm.client import get_llm
 
 
 logger = logging.getLogger(__name__)
 
 
-def extractor_node(state: AgentState) -> Dict[str, Any]:
+EXTRACTION_PROMPT = """You are a knowledge graph extraction expert working with the Agnosia Knowledge Graph schema with FRACTAL ORP STRUCTURE.
+
+KNOWLEDGE GRAPH SCHEMA (Fractal ORP):
+Node Types (use as "label"):
+- Concept: Core knowledge unit (e.g., "photosynthesis", "linear equations")
+- Claim: Evidence-backed statements (e.g., "Photosynthesis converts CO2 to glucose")
+- Evidence: Empirical or theoretical support
+- Source: Academic papers, books, expert opinions
+- Method: Research methodology
+- Scope: Context and constraints
+- Position: Normative stances
+- Hypernode: Meta-node encapsulating subgraphs (enables fractal nesting)
+- Process: Dynamic flows/transformations in ORP model
+
+Edge Types (Standard):
+- DEFINES: Claim → Concept (a claim defines a concept)
+- SUPPORTS/REFUTES: Evidence → Claim
+- PREREQ/PrerequisiteOf: Concept → Concept (learning progression)
+- PartOf: Concept → Concept (hierarchical)
+- IsA: Concept → Concept (taxonomy)
+- RELATED_TO: General relationships
+- UNDER_SCOPE: Node → Scope
+- CONTRADICTS: Claim ↔ Claim
+
+Edge Types (Fractal ORP):
+- CONTAINS: Hypernode → Node (hypernode contains subgraph)
+- NESTED_IN: Node → Hypernode (node nested in hypernode)
+- ENABLES: Process → Node (process enables transformation)
+- INPUTS_TO: Node → Process (object/relation inputs to process)
+- OUTPUTS_FROM: Process → Node (process outputs object/relation)
+- SCALES_TO: Node → Node (fractal scaling: micro → meso → macro)
+- MIRRORS: Node ↔ Node (self-similar patterns at different scales)
+
+ORP MODEL (Object-Relation-Process):
+- Objects: Building blocks (Concepts, Claims, Evidence)
+- Relations: Connectors (edges between objects)
+- Processes: Dynamic flows (Process nodes with inputs/outputs)
+- Scales: micro (individual claims), meso (clusters), macro (domains)
+- Fractal: ORP structure repeats at every scale
+
+FRACTAL EXTRACTION GUIDELINES:
+1. **Detect Scale**: 
+   - micro: Single concepts/claims (< 5 nodes)
+   - meso: Clusters/subgraphs (5-20 nodes, e.g., "logic gate", "circuit module")
+   - macro: Domains/hierarchies (> 20 nodes, e.g., "computational architecture")
+
+2. **Identify ORP Patterns**:
+   - Objects: Extract Concepts, Claims, Evidence as objects
+   - Relations: Extract edges as relations
+   - Processes: Identify dynamic flows (e.g., "signal propagation", "boolean evaluation", "recursive scaling")
+
+3. **Hypernode Creation**:
+   - If extracting a cluster/subgraph (meso/macro), create a Hypernode to encapsulate it
+   - Use CONTAINS edges from hypernode to contained nodes
+   - Set scale property: "micro", "meso", or "macro"
+
+4. **Process Nodes**:
+   - Extract dynamic transformations as Process nodes
+   - Create INPUTS_TO edges from input objects to process
+   - Create OUTPUTS_FROM edges from process to output objects
+   - Set scale matching the ORP structure
+
+5. **Fractal Scaling**:
+   - If similar patterns exist at different scales, create SCALES_TO edges
+   - If self-similar patterns detected, create MIRRORS edges
+
+ID Format: Use prefixes C:, CL:, E:, SRC:, M:, S:, PO:, HN:, P: followed by UUID
+For extraction, you can use temporary IDs like "C:temp_1" - they will be converted to proper UUIDs later.
+
+Current KG State: 175 concepts, 615 edges, 100% metadata coverage
+
+Extract:
+1. **Entities**: Concepts, Claims, Evidence, Sources, Hypernodes, Processes
+   - Each entity should have: id (with proper prefix), label (node type), properties (name, description, domain, scale, etc.)
+2. **Relations**: Connections using proper edge types
+   - Each relation should have: from (entity id), to (entity id), type (edge type), properties (optional)
+3. **ORP Structure**: Identify objects, relations, and processes
+   - If cluster detected, create Hypernode with CONTAINS edges
+   - If processes detected, create Process nodes with INPUTS_TO/OUTPUTS_FROM edges
+
+Return ONLY valid JSON in this exact format:
+{{
+  "entities": [
+    {{"id": "C:temp_1", "label": "Concept", "properties": {{"name": "Photosynthesis", "domain": "biology", "description": "..."}}}},
+    {{"id": "CL:temp_1", "label": "Claim", "properties": {{"text": "Photosynthesis converts CO2 to glucose", "claimType": "definition"}}}},
+    {{"id": "HN:temp_1", "label": "Hypernode", "properties": {{"name": "Photosynthesis Cluster", "scale": "meso"}}}},
+    {{"id": "P:temp_1", "label": "Process", "properties": {{"name": "CO2 Conversion", "processType": "transformation", "scale": "micro"}}}}
+  ],
+  "relations": [
+    {{"from": "CL:temp_1", "to": "C:temp_1", "type": "DEFINES", "properties": {{"primary": true}}}},
+    {{"from": "HN:temp_1", "to": "C:temp_1", "type": "CONTAINS", "properties": {{"containment_type": "orp_structure"}}}},
+    {{"from": "C:temp_1", "to": "P:temp_1", "type": "INPUTS_TO", "properties": {{"scale": "micro"}}}}
+  ],
+  "claims": []
+}}
+
+If the input is a simple topic request like "topic=photosynthesis", extract:
+- A Concept node for "photosynthesis"
+- Optionally related concepts if mentioned
+- PrerequisiteOf or PartOf relationships if learning progression is implied
+- If multiple related concepts, consider creating a Hypernode to cluster them
+
+User input: {user_input}
+
+JSON:"""
+
+
+async def extractor_node(state: AgentState) -> Dict[str, Any]:
     """
-    Extract entities, relations, and claims from user input.
+    Extract entities, relations, and claims from user input using LLM.
     
     Input: user_input
     Output: Extracted entities/relations in structured format
-    
-    This is a stub that creates placeholder extraction results.
-    Replace with actual NLP/LLM extraction logic.
     """
     user_input = state.get("user_input", "")
     logger.info(f"Extracting from input: {user_input[:100]}...")
     
-    # Stub: Create placeholder extraction
-    # TODO: Replace with actual extraction (e.g., using LLM, NER, etc.)
-    extracted = {
-        "entities": [
-            {"id": "entity_1", "label": "Topic", "properties": {"name": user_input.split("=")[-1].strip() if "=" in user_input else user_input}}
-        ],
-        "relations": [],
-        "claims": []
-    }
+    llm = get_llm()
+    
+    if not llm:
+        # Fallback to simple extraction if no LLM available
+        logger.warning("No LLM available, using fallback extraction")
+        topic_name = user_input.split("=")[-1].strip() if "=" in user_input else user_input
+        extracted = {
+            "entities": [
+                {
+                    "id": f"entity_{uuid.uuid4().hex[:8]}",
+                    "label": "Topic",
+                    "properties": {"name": topic_name, "description": f"Topic: {topic_name}"}
+                }
+            ],
+            "relations": [],
+            "claims": []
+        }
+    else:
+        try:
+            # Use LLM for extraction
+            prompt = EXTRACTION_PROMPT.format(user_input=user_input)
+            response = await llm.ainvoke(prompt)
+            
+            # Parse JSON response
+            content = response.content.strip()
+            # Remove markdown code blocks if present
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+            
+            extracted = json.loads(content)
+            
+            # Ensure all entities have proper IDs with prefixes
+            for i, entity in enumerate(extracted.get("entities", [])):
+                if "id" not in entity:
+                    label = entity.get("label", "Concept")
+                    # Map common labels to node types
+                    label_map = {
+                        "Person": "Concept",
+                        "Topic": "Concept",
+                        "Entity": "Concept"
+                    }
+                    node_type = label_map.get(label, label)
+                    if node_type in NODE_TYPES:
+                        entity["id"] = generate_id(node_type)
+                    else:
+                        # Default to Concept if unknown
+                        entity["id"] = generate_id("Concept")
+                # Validate and fix ID format if needed
+                elif not validate_id(entity["id"]):
+                    # If ID doesn't match format, generate new one
+                    label = entity.get("label", "Concept")
+                    label_map = {"Person": "Concept", "Topic": "Concept", "Entity": "Concept"}
+                    node_type = label_map.get(label, label)
+                    if node_type not in NODE_TYPES:
+                        node_type = "Concept"
+                    entity["id"] = generate_id(node_type)
+            
+            logger.info(f"Extracted {len(extracted.get('entities', []))} entities, {len(extracted.get('relations', []))} relations")
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM response as JSON: {e}")
+            logger.debug(f"Response content: {response.content if 'response' in locals() else 'N/A'}")
+            # Fallback extraction with proper KG ID format
+            topic_name = user_input.split("=")[-1].strip() if "=" in user_input else user_input
+            extracted = {
+                "entities": [
+                    {
+                        "id": generate_id("Concept"),
+                        "label": "Concept",
+                        "properties": {"name": topic_name, "description": f"Topic: {topic_name}", "domain": "general"}
+                    }
+                ],
+                "relations": [],
+                "claims": []
+            }
+        except Exception as e:
+            logger.error(f"Error in LLM extraction: {e}", exc_info=True)
+            # Fallback extraction with proper KG ID format
+            topic_name = user_input.split("=")[-1].strip() if "=" in user_input else user_input
+            extracted = {
+                "entities": [
+                    {
+                        "id": generate_id("Concept"),
+                        "label": "Concept",
+                        "properties": {"name": topic_name, "description": f"Topic: {topic_name}", "domain": "general"}
+                    }
+                ],
+                "relations": [],
+                "claims": []
+            }
     
     return {
         "working_notes": {
@@ -39,27 +252,127 @@ def extractor_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
-def linker_node(state: AgentState) -> Dict[str, Any]:
+# Helper functions
+def normalize_name(name: str) -> str:
+    """Normalize entity name for matching."""
+    return name.lower().strip().replace(" ", "_").replace("-", "_")
+
+
+def map_label_to_node_type(label: str) -> str:
+    """Map entity label to proper KG node type."""
+    label_map = {
+        "Person": "Concept",
+        "Topic": "Concept",
+        "Entity": "Concept",
+        "Concept": "Concept",
+        "Claim": "Claim",
+        "Evidence": "Evidence",
+        "Source": "Source",
+        "Method": "Method",
+        "Scope": "Scope",
+        "Position": "Position"
+    }
+    return label_map.get(label, "Concept")
+
+
+async def linker_node(state: AgentState) -> Dict[str, Any]:
     """
     Deduplicate and link entities to canonical IDs.
     
     Input: working_notes.extracted
     Output: Linked entities with canonical IDs
     
-    This is a stub that passes through entities.
-    Replace with actual entity linking/deduplication logic.
+    Performs basic entity linking:
+    - Normalizes entity names for matching
+    - Checks for existing entities in KG (if available)
+    - Maps to canonical IDs
     """
     working_notes = state.get("working_notes", {})
     extracted = working_notes.get("extracted", {})
-    logger.info(f"Linking {len(extracted.get('entities', []))} entities")
+    entities = extracted.get("entities", [])
+    relations = extracted.get("relations", [])
     
-    # Stub: Pass through (no actual linking)
-    # TODO: Replace with actual entity linking (fuzzy matching, KG lookup, etc.)
+    logger.info(f"Linking {len(entities)} entities")
+    
+    # Build canonical ID mapping
+    canonical_ids = {}
+    linked_entities = []
+    entity_name_map = {}  # normalized_name -> canonical_id
+    
+    # Try to query KG for existing entities (if KG client available)
+    kg_entities = {}
+    try:
+        from app.kg.client import query_entities
+        entity_names = [e.get("properties", {}).get("name", "") for e in entities if e.get("properties", {}).get("name")]
+        if entity_names:
+            kg_entities = await query_entities(entity_names)
+            logger.info(f"Found {len(kg_entities)} existing entities in KG")
+    except Exception as e:
+        logger.debug(f"Could not query KG for existing entities: {e}")
+    
+    # Process each entity
+    for entity in entities:
+        entity_id = entity.get("id", "")
+        entity_label = entity.get("label", "Concept")
+        entity_name = entity.get("properties", {}).get("name", "")
+        normalized_name = normalize_name(entity_name) if entity_name else None
+        
+        # Ensure entity has proper ID format
+        if not entity_id or not validate_id(entity_id):
+            node_type = map_label_to_node_type(entity_label)
+            entity_id = generate_id(node_type)
+            entity["id"] = entity_id
+        
+        # Check if entity exists in KG
+        canonical_id = None
+        if normalized_name and normalized_name in kg_entities:
+            # Use existing KG entity ID
+            canonical_id = kg_entities[normalized_name]
+            canonical_ids[entity_id] = canonical_id
+            logger.debug(f"Linked {entity_name} to existing KG entity {canonical_id}")
+        elif normalized_name and normalized_name in entity_name_map:
+            # Use canonical ID from already processed entities in this batch
+            canonical_id = entity_name_map[normalized_name]
+            canonical_ids[entity_id] = canonical_id
+            logger.debug(f"Linked {entity_name} to canonical ID {canonical_id} (deduplicated)")
+        else:
+            # New entity - use its ID as canonical
+            canonical_id = entity_id
+            canonical_ids[entity_id] = canonical_id
+            if normalized_name:
+                entity_name_map[normalized_name] = canonical_id
+        
+        # Add to linked entities (use canonical ID)
+        linked_entity = entity.copy()
+        linked_entity["id"] = canonical_id
+        # Ensure label matches KG node type
+        node_type = get_node_type_from_id(canonical_id)
+        if node_type:
+            linked_entity["label"] = node_type
+        linked_entities.append(linked_entity)
+    
+    # Update relation references to use canonical IDs
+    linked_relations = []
+    for rel in relations:
+        from_id = rel.get("from")
+        to_id = rel.get("to")
+        
+        # Map to canonical IDs
+        canonical_from = canonical_ids.get(from_id, from_id)
+        canonical_to = canonical_ids.get(to_id, to_id)
+        
+        linked_rel = rel.copy()
+        linked_rel["from"] = canonical_from
+        linked_rel["to"] = canonical_to
+        linked_relations.append(linked_rel)
+    
     linked = {
-        "entities": extracted.get("entities", []),
-        "relations": extracted.get("relations", []),
-        "canonical_ids": {}  # Would map entity IDs to canonical IDs
+        "entities": linked_entities,
+        "relations": linked_relations,
+        "canonical_ids": canonical_ids
     }
+    
+    logger.info(f"Linked to {len(set(canonical_ids.values()))} unique entities")
     
     return {
         "working_notes": {
@@ -87,21 +400,111 @@ def writer_node(state: AgentState) -> Dict[str, Any]:
     diff_id = create_diff_id()
     
     # Convert linked entities to diff format
-    # This is a stub - actual implementation would convert entities to KG format
     entities = linked.get("entities", [])
+    
+    # Detect ORP patterns and create hypernodes if needed
+    orp_pattern = detect_orp_pattern(entities, linked.get("relations", []))
+    
+    # If we have a cluster (meso/macro scale), create hypernode
+    should_create_hypernode = (
+        len(entities) >= 5 or  # 5+ nodes suggests cluster
+        any(e.get("label") == "Hypernode" for e in entities) or
+        any("cluster" in str(e.get("properties", {}).get("name", "")).lower() for e in entities)
+    )
+    
+    hypernode_id = None
+    if should_create_hypernode and not any(e.get("label") == "Hypernode" for e in entities):
+        # Infer scale from content
+        content = state.get("user_input", "")
+        scale = infer_scale_from_content(content, len(entities))
+        
+        # Create hypernode
+        from app.kg.hypernode import create_hypernode
+        hypernode = create_hypernode(
+            name=f"Cluster_{len(entities)}_nodes",
+            scale=scale,
+            subgraph_nodes=[e.get("id") for e in entities if e.get("id")],
+            orp_structure={
+                "objects": [e["id"] for e in orp_pattern.get("objects", [])],
+                "relations": [],
+                "processes": [e["id"] for e in entities if e.get("label") == "Process"]
+            }
+        )
+        hypernode_id = hypernode["id"]
+        diff["nodes"]["add"].append(hypernode)
+    
     for entity in entities:
+        entity_id = entity.get("id", "unknown")
+        entity_label = entity.get("label", "Concept")
+        
+        # Map label to proper KG node type
+        node_type = map_label_to_node_type(entity_label)
+        if validate_id(entity_id):
+            # Get node type from ID if valid
+            id_node_type = get_node_type_from_id(entity_id)
+            if id_node_type:
+                node_type = id_node_type
+        
+        # Include entity ID in properties for Neo4j matching
+        properties = entity.get("properties", {}).copy()
+        properties["id"] = entity_id  # Store original ID
+        
+        # Add scale property if not present (for ORP)
+        if "scale" not in properties and node_type in ["Concept", "Claim", "Process", "Hypernode"]:
+            content = state.get("user_input", "")
+            properties["scale"] = infer_scale_from_content(content, len(entities))
+        
+        # Add category information if domain is present
+        if node_type == "Concept" and "domain" in properties:
+            domain_name = properties["domain"]
+            category_key = get_category_by_domain(domain_name)
+            if category_key:
+                properties["category"] = category_key
+                upper_ontology = get_upper_ontology_by_category(category_key)
+                orp_role = get_orp_role_by_category(category_key)
+                if upper_ontology:
+                    properties["upper_ontology"] = upper_ontology
+                if orp_role:
+                    properties["orp_role"] = orp_role
+        
         diff["nodes"]["add"].append({
-            "id": entity.get("id", "unknown"),
-            "label": entity.get("label", "Entity"),
-            "properties": entity.get("properties", {})
+            "id": entity_id,
+            "label": node_type,  # Use proper KG node type
+            "properties": properties
         })
+        
+        # If hypernode created, add CONTAINS edge
+        if hypernode_id and node_type != "Hypernode":
+            diff["edges"]["add"].append({
+                "from": hypernode_id,
+                "to": entity_id,
+                "type": "CONTAINS",
+                "properties": {
+                    "containment_type": "orp_structure",
+                    "compression_level": 0.5
+                }
+            })
     
     relations = linked.get("relations", [])
     for rel in relations:
+        edge_type = rel.get("type", "RELATED_TO")
+        # Validate edge type against known types
+        if edge_type not in EDGE_TYPES:
+            # Try to map common edge types
+            edge_type_map = {
+                "STUDIES": "RELATED_TO",
+                "WORKS_ON": "RELATED_TO",
+                "KNOWS": "RELATED_TO",
+                "PREREQ": "PrerequisiteOf",
+                "PREREQUISITE": "PrerequisiteOf"
+            }
+            edge_type = edge_type_map.get(edge_type, "RELATED_TO")
+            logger.debug(f"Mapped edge type {rel.get('type')} to {edge_type}")
+        
         diff["edges"]["add"].append({
             "from": rel.get("from"),
             "to": rel.get("to"),
-            "type": rel.get("type", "RELATED_TO"),
+            "type": edge_type,
             "properties": rel.get("properties", {})
         })
     
@@ -178,3 +581,118 @@ def handle_reject_node(state: AgentState) -> Dict[str, Any]:
         "approval_required": False,
         "final_response": "❌ Changes rejected. What would you like to do instead?"
     }
+
+
+async def query_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Query the knowledge graph based on user input.
+    Supports fractal navigation: expand, zoom, scale queries.
+    
+    Input: user_input (query text)
+    Output: final_response with query results
+    """
+    user_input = state.get("user_input", "")
+    logger.info(f"Querying KG: {user_input[:100]}...")
+    
+    # Extract query from user input (remove /query prefix if present)
+    query_text = user_input.replace("/query", "").strip()
+    if not query_text:
+        return {
+            "final_response": "❌ Please provide a query. Example: /query What is photosynthesis?"
+        }
+    
+    try:
+        from app.kg.client import query_kg, expand_hypernode, query_fractal_scale, query_orp_structure
+        
+        # Check for fractal navigation commands
+        query_lower = query_text.lower()
+        
+        # Expand hypernode
+        if query_lower.startswith("expand ") or query_lower.startswith("zoom in "):
+            hypernode_id = query_text.split(" ", 1)[-1].strip()
+            expansion = await expand_hypernode(hypernode_id)
+            if expansion.get("nodes"):
+                response = f"🔍 Expanded Hypernode {hypernode_id}:\n\n"
+                response += f"Nodes: {len(expansion['nodes'])}\n"
+                response += f"Edges: {len(expansion['edges'])}\n\n"
+                for i, node in enumerate(expansion["nodes"][:10], 1):
+                    name = node.get("properties", {}).get("name", node.get("id", "Unknown"))
+                    response += f"{i}. {name} ({node.get('label', 'Unknown')})\n"
+                return {"final_response": response}
+            else:
+                return {"final_response": f"❌ Could not expand hypernode {hypernode_id}"}
+        
+        # Query fractal scale
+        if query_lower.startswith("scale to ") or query_lower.startswith("zoom to "):
+            parts = query_text.split(" ", 2)
+            if len(parts) >= 3:
+                node_id = parts[1]
+                target_scale = parts[2].lower()
+                if target_scale in ["micro", "meso", "macro"]:
+                    scale_results = await query_fractal_scale(node_id, target_scale)
+                    response = f"🔍 Fractal Scale Query: {node_id} → {target_scale}\n\n"
+                    response += f"Found {len(scale_results.get('nodes', []))} nodes at {target_scale} scale\n"
+                    for i, node in enumerate(scale_results.get("nodes", [])[:10], 1):
+                        name = node.get("properties", {}).get("name", node.get("id", "Unknown"))
+                        response += f"{i}. {name}\n"
+                    return {"final_response": response}
+        
+        # Query ORP structure
+        if query_lower.startswith("orp ") or query_lower.startswith("structure "):
+            node_id = query_text.split(" ", 1)[-1].strip()
+            orp = await query_orp_structure(node_id)
+            response = f"🔍 ORP Structure for {node_id}:\n\n"
+            response += f"Objects: {len(orp.get('objects', []))}\n"
+            response += f"Processes: {len(orp.get('processes', []))}\n"
+            response += f"Relations: {len(orp.get('relations', []))}\n"
+            return {"final_response": response}
+        
+        # Standard query
+        results = await query_kg(query_text)
+        
+        if not results:
+            return {
+                "final_response": f"🔍 No results found for: {query_text}\n\nTry a different query or add knowledge first with /ingest\n\nFractal commands:\n- /query expand <hypernode_id>\n- /query scale to <node_id> <micro|meso|macro>\n- /query orp <node_id>"
+            }
+        
+        # Format results
+        response = f"🔍 Query: {query_text}\n\n"
+        response += f"Found {len(results)} result(s):\n\n"
+        
+        for i, result in enumerate(results[:10], 1):  # Limit to 10 results
+            if isinstance(result, dict):
+                if "name" in result:
+                    response += f"{i}. {result['name']}"
+                    if "description" in result:
+                        response += f" - {result['description'][:100]}"
+                    # Show scale if available
+                    props = result.get("properties", {})
+                    if "scale" in props:
+                        response += f" [{props['scale']}]"
+                    response += "\n"
+                elif "type" in result:
+                    response += f"{i}. {result.get('type', 'Unknown')} relation"
+                    if "from" in result and "to" in result:
+                        response += f": {result['from']} -> {result['to']}"
+                    response += "\n"
+                else:
+                    response += f"{i}. {str(result)[:100]}\n"
+            else:
+                response += f"{i}. {str(result)[:100]}\n"
+        
+        if len(results) > 10:
+            response += f"\n... and {len(results) - 10} more results"
+        
+        response += "\n\n💡 Fractal Navigation:\n"
+        response += "- /query expand <hypernode_id> - Expand hypernode\n"
+        response += "- /query scale to <node_id> <micro|meso|macro> - Query fractal scale\n"
+        response += "- /query orp <node_id> - View ORP structure\n"
+        
+        return {"final_response": response}
+    
+    except Exception as e:
+        logger.error(f"Error querying KG: {e}", exc_info=True)
+        return {
+            "error": str(e),
+            "final_response": f"❌ Error querying knowledge graph: {e}"
+        }
