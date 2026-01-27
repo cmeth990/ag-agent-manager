@@ -1,6 +1,8 @@
 """Postgres checkpointer setup for LangGraph persistence."""
 import os
 from langgraph.checkpoint.postgres import PostgresSaver
+from psycopg_pool import ConnectionPool
+from psycopg.rows import dict_row
 
 
 def get_database_url() -> str:
