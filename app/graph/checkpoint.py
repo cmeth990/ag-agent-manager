@@ -28,6 +28,7 @@ def create_checkpointer() -> PostgresSaver:
     # This prevents connection timeouts and allows reuse
     pool = ConnectionPool(
         database_url,
+        min_size=1,
         max_size=10,
         kwargs={"autocommit": True, "row_factory": dict_row}
     )
