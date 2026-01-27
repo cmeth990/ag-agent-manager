@@ -21,48 +21,19 @@ def create_checkpointer():
     """
     Create and initialize checkpointer for LangGraph.
     
-    Tries PostgresSaver first, falls back to MemorySaver if there's an issue.
+    Uses MemorySaver for now due to PostgresSaver NotImplementedError bug.
+    TODO: Fix PostgresSaver once langgraph-checkpoint-postgres is updated.
     
     Returns:
-        PostgresSaver or MemorySaver instance configured for persistence
+        MemorySaver instance (in-memory persistence)
     """
-    # Try to use Postgres if DATABASE_URL is available
-    database_url = os.getenv("DATABASE_URL")
+    # Temporarily use MemorySaver due to PostgresSaver NotImplementedError bug
+    # PostgresSaver has a bug where aget_tuple raises NotImplementedError
+    # Once langgraph-checkpoint-postgres is fixed, we can switch back to PostgresSaver
+    logger.info("Using MemorySaver checkpointer (in-memory persistence)")
+    logger.info("Note: PostgresSaver has NotImplementedError bug, using MemorySaver as workaround")
     
-    if database_url and not database_url.startswith("postgresql://user:password@localhost"):
-        try:
-            logger.info("Creating Postgres checkpointer with ConnectionPool...")
-            logger.info(f"Checkpoint module file: {__file__}")
-            logger.info(f"PostgresSaver class: {PostgresSaver}")
-            logger.info(f"ConnectionPool class: {ConnectionPool}")
-            # Log first 50 chars of URL (hide password)
-            url_preview = database_url[:50] + "..." if len(database_url) > 50 else database_url
-            logger.info(f"Database URL preview: {url_preview}")
-            
-            # Use ConnectionPool for better connection management
-            # This prevents connection timeouts and allows reuse
-            pool = ConnectionPool(
-                database_url,
-                min_size=1,
-                max_size=10,
-                kwargs={"autocommit": True, "row_factory": dict_row}
-            )
-            logger.info(f"ConnectionPool created: {type(pool)}")
-            
-            # Create checkpointer with the connection pool directly
-            # PostgresSaver accepts ConnectionPool as the conn parameter
-            checkpointer = PostgresSaver(pool)
-            logger.info(f"PostgresSaver created: {type(checkpointer)}, has setup: {hasattr(checkpointer, 'setup')}")
-            
-            # Ensure tables are created
-            checkpointer.setup()
-            logger.info("Postgres checkpointer setup complete")
-            
-            return checkpointer
-        except Exception as e:
-            logger.warning(f"Failed to create Postgres checkpointer: {e}")
-            logger.info("Falling back to MemorySaver (in-memory, no persistence)")
-            return MemorySaver()
-    else:
-        logger.info("DATABASE_URL not configured or is placeholder, using MemorySaver")
-        return MemorySaver()
+    checkpointer = MemorySaver()
+    logger.info("MemorySaver checkpointer created")
+    
+    return checkpointer
