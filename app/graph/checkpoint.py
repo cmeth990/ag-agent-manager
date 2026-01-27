@@ -30,6 +30,9 @@ def create_checkpointer() -> PostgresSaver:
     logger.info(f"Checkpoint module file: {__file__}")
     logger.info(f"PostgresSaver class: {PostgresSaver}")
     logger.info(f"ConnectionPool class: {ConnectionPool}")
+    # Log first 50 chars of URL (hide password)
+    url_preview = database_url[:50] + "..." if len(database_url) > 50 else database_url
+    logger.info(f"Database URL preview: {url_preview}")
     
     # Use ConnectionPool for better connection management
     # This prevents connection timeouts and allows reuse
