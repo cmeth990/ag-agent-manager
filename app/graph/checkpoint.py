@@ -1,8 +1,11 @@
 """Postgres checkpointer setup for LangGraph persistence."""
 import os
+import logging
 from langgraph.checkpoint.postgres import PostgresSaver
 from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
+
+logger = logging.getLogger(__name__)
 
 
 def get_database_url() -> str:
@@ -22,11 +25,11 @@ def create_checkpointer() -> PostgresSaver:
     Returns:
         PostgresSaver instance configured for persistence
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
     database_url = get_database_url()
     logger.info("Creating checkpointer with ConnectionPool...")
+    logger.info(f"Checkpoint module file: {__file__}")
+    logger.info(f"PostgresSaver class: {PostgresSaver}")
+    logger.info(f"ConnectionPool class: {ConnectionPool}")
     
     # Use ConnectionPool for better connection management
     # This prevents connection timeouts and allows reuse
