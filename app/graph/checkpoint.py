@@ -24,9 +24,17 @@ def create_checkpointer() -> PostgresSaver:
     """
     database_url = get_database_url()
     
-    # PostgresSaver accepts a connection string directly via from_conn_string
-    # This method handles connection management internally
-    checkpointer = PostgresSaver.from_conn_string(database_url)
+    # Use ConnectionPool for better connection management
+    # This prevents connection timeouts and allows reuse
+    pool = ConnectionPool(
+        database_url,
+        max_size=10,
+        kwargs={"autocommit": True, "row_factory": dict_row}
+    )
+    
+    # Create checkpointer with the connection pool directly
+    # PostgresSaver accepts ConnectionPool as the conn parameter
+    checkpointer = PostgresSaver(pool)
     
     # Ensure tables are created
     checkpointer.setup()
