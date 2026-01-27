@@ -81,7 +81,13 @@ async def telegram_webhook(request: Request):
             
             # Run graph
             thread_id = str(chat_id)  # Use chat_id as thread_id for persistence
-            result = await run_graph(initial_state, thread_id)
+            try:
+                result = await run_graph(initial_state, thread_id)
+                logger.info(f"Graph execution completed for {chat_id}, intent: {result.get('intent')}")
+            except Exception as e:
+                logger.error(f"Error running graph: {e}", exc_info=True)
+                await send_message(chat_id, f"❌ Error processing command: {str(e)[:200]}")
+                return JSONResponse({"ok": True})
             
             # Check if approval is required
             if result.get("approval_required") and result.get("diff_id"):
@@ -90,16 +96,29 @@ async def telegram_webhook(request: Request):
                 response_text = result.get("final_response", "Please approve or reject the proposed changes.")
                 
                 keyboard = build_approval_keyboard(diff_id)
-                await send_message(chat_id, response_text, reply_markup=keyboard)
+                try:
+                    await send_message(chat_id, response_text, reply_markup=keyboard)
+                except Exception as e:
+                    logger.error(f"Error sending approval message: {e}")
             elif result.get("final_response"):
                 # Send regular response
-                await send_message(chat_id, result["final_response"])
+                try:
+                    await send_message(chat_id, result["final_response"])
+                    logger.info(f"Sent response to {chat_id}")
+                except Exception as e:
+                    logger.error(f"Error sending message to {chat_id}: {e}", exc_info=True)
             elif result.get("error"):
                 # Send error message
-                await send_message(chat_id, f"❌ Error: {result['error']}")
+                try:
+                    await send_message(chat_id, f"❌ Error: {result['error']}")
+                except Exception as e:
+                    logger.error(f"Error sending error message: {e}")
             else:
                 # Fallback
-                await send_message(chat_id, "Processing complete.")
+                try:
+                    await send_message(chat_id, "Processing complete.")
+                except Exception as e:
+                    logger.error(f"Error sending fallback message: {e}")
             
             return JSONResponse({"ok": True})
         
