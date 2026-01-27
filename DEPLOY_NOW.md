@@ -1,104 +1,163 @@
-# 🚀 Deploy to Railway - Ready to Go!
+# 🚀 Railway Deployment - Quick Start
 
-Your Telegram KG Manager Bot is **ready for Railway deployment**!
+## Current Status
+✅ Project structure ready  
+✅ Procfile configured  
+✅ railway.json configured  
+✅ Telegram token configured  
+⚠️  GitHub repository needs to be set up
 
-## ✅ Pre-Deployment Checklist
+## Step 1: Create GitHub Repository
 
-- ✅ Git repository initialized
-- ✅ All code files in place
-- ✅ `Procfile` configured for Railway
-- ✅ `railway.json` configured
-- ✅ `requirements.txt` with all dependencies
-- ✅ Telegram bot token: `8467185687:AAGQXB0Ec5yxwN9SYsSl_xHvex5YHqEYNe4`
+1. Go to https://github.com/new
+2. Repository name: `ag-agent-manager` (or any name you prefer)
+3. Make it **Private** or **Public** (your choice)
+4. **DO NOT** initialize with README, .gitignore, or license (we already have these)
+5. Click **"Create repository"**
 
-## 🎯 Quick Deployment Steps
+## Step 2: Update Git Remote
 
-### 1. Push to GitHub (if not already done)
+After creating the GitHub repo, you'll get a URL like:
+- `https://github.com/YOUR_USERNAME/ag-agent-manager.git` (HTTPS)
+- `git@github.com:YOUR_USERNAME/ag-agent-manager.git` (SSH)
+
+**Update the remote:**
+```bash
+cd /Users/cmethod/LUMI_3/ag-agent-manager
+git remote set-url origin https://github.com/YOUR_USERNAME/ag-agent-manager.git
+# Replace YOUR_USERNAME with your actual GitHub username
+```
+
+**Verify:**
+```bash
+git remote -v
+```
+
+## Step 3: Push to GitHub
 
 ```bash
-# Create a new repo on GitHub first: https://github.com/new
-# Then:
-git remote add origin https://github.com/YOUR_USERNAME/ag-agent-manager.git
-git branch -M main
+cd /Users/cmethod/LUMI_3/ag-agent-manager
+git add .
+git commit -m "Ready for Railway deployment"
 git push -u origin main
 ```
 
-### 2. Deploy on Railway
+## Step 4: Deploy to Railway
 
-1. **Go to Railway:** https://railway.app
-2. **New Project** → **Deploy from GitHub repo**
-3. **Select** your `ag-agent-manager` repository
-4. Railway will auto-detect Python and start building
+1. Go to https://railway.app and sign in (or create account)
+2. Click **"New Project"**
+3. Select **"Deploy from GitHub repo"**
+4. Authorize Railway to access your GitHub if prompted
+5. Select your `ag-agent-manager` repository
+6. Railway will automatically start deploying
 
-### 3. Add Postgres Database
+## Step 5: Add Postgres Database
 
-1. In Railway project → **"+ New"**
-2. **Database** → **Add Postgres**
-3. Railway auto-injects `DATABASE_URL` ✅
+1. In Railway project dashboard, click **"+ New"**
+2. Select **"Database"** → **"Add Postgres"**
+3. Railway automatically:
+   - Creates Postgres database
+   - Injects `DATABASE_URL` environment variable
+   - Links it to your service
 
-### 4. Set Environment Variable
+## Step 6: Set Environment Variables
 
-In Railway → Your Service → **Variables**:
+1. In Railway project → Click on your **service** (not the database)
+2. Go to **"Variables"** tab
+3. Click **"+ New Variable"**
+4. Add:
+   - **Name:** `TELEGRAM_BOT_TOKEN`
+   - **Value:** `8467185687:AAGQXB0Ec5yxwN9SYsSl_xHvex5YHqEYNe4`
+5. Click **"Add"**
 
-| Variable | Value |
-|----------|-------|
-| `TELEGRAM_BOT_TOKEN` | `8467185687:AAGQXB0Ec5yxwN9SYsSl_xHvex5YHqEYNe4` |
+**Note:** `DATABASE_URL` is automatically set by Railway (don't add it manually)
 
-### 5. Get Railway URL & Set Webhook
+## Step 7: Wait for Deployment
 
-After deployment completes, Railway gives you a URL like:
+1. Check the **"Deployments"** tab
+2. Wait for status to show **"Active"** (green)
+3. Once deployed, Railway provides a public URL:
+   - Go to **"Settings"** → **"Domains"**
+   - Copy the URL (e.g., `https://your-app-name.up.railway.app`)
+
+## Step 8: Set Telegram Webhook
+
+After you have your Railway URL, set the webhook:
+
+**Option A: Using Python script (recommended)**
+```bash
+cd /Users/cmethod/LUMI_3/ag-agent-manager
+export TELEGRAM_BOT_TOKEN=8467185687:AAGQXB0Ec5yxwN9SYsSl_xHvex5YHqEYNe4
+python scripts/set_webhook.py set https://your-app-name.up.railway.app/telegram/webhook
 ```
-https://your-app-name.up.railway.app
-```
 
-**Set webhook:**
+**Option B: Using curl**
 ```bash
 curl -X POST "https://api.telegram.org/bot8467185687:AAGQXB0Ec5yxwN9SYsSl_xHvex5YHqEYNe4/setWebhook" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://your-app-name.up.railway.app/telegram/webhook"}'
 ```
 
-**Verify:**
+## Step 9: Verify Webhook
+
+```bash
+python scripts/set_webhook.py info
+```
+
+Or:
 ```bash
 curl "https://api.telegram.org/bot8467185687:AAGQXB0Ec5yxwN9SYsSl_xHvex5YHqEYNe4/getWebhookInfo"
 ```
 
-## 🧪 Test Your Bot
+## Step 10: Test the Bot
 
-1. Open Telegram → Find your bot
-2. Send `/help`
-3. Send `/ingest topic=photosynthesis`
-4. Tap **Approve** button
-5. ✅ Should confirm commit!
+1. Open Telegram
+2. Find your bot
+3. Send `/help` - should get a response
+4. Send `/ingest topic=photosynthesis` - should trigger approval flow
+5. Tap **Approve** button - should commit and confirm
 
-## 📊 Monitor Deployment
+## Troubleshooting
 
-- **Logs:** Railway Dashboard → Service → **Logs**
-- **Metrics:** Railway Dashboard → Service → **Metrics**
-- **Variables:** Railway Dashboard → Service → **Variables**
+### Service won't start
+- Check Railway **Logs** tab for errors
+- Verify all environment variables are set
+- Check that Postgres service is running
 
-## 🆘 Quick Troubleshooting
-
-**Service won't start?**
-- Check Railway logs
-- Verify `TELEGRAM_BOT_TOKEN` is set
-- Ensure Postgres service is running
-
-**Webhook not working?**
-- Verify webhook URL is set (use `getWebhookInfo`)
+### Webhook not working
+- Verify webhook URL is set correctly
 - Check Railway logs for incoming requests
-- Ensure URL uses `https://`
+- Ensure Railway URL uses HTTPS (Telegram requires it)
 
-**Database errors?**
-- Verify Postgres service is running
-- Check `DATABASE_URL` is auto-injected by Railway
+### Database errors
+- Verify Postgres service is running in Railway
+- Check `DATABASE_URL` is automatically set (don't set it manually)
+- Look for checkpointer initialization in logs
 
-## 📚 Full Documentation
+## Quick Commands Reference
 
-- **Detailed Guide:** See `RAILWAY_DEPLOY.md`
-- **Quick Start:** See `RAILWAY_QUICKSTART.md`
-- **General Setup:** See `README.md`
+```bash
+# Update git remote (after creating GitHub repo)
+git remote set-url origin https://github.com/YOUR_USERNAME/ag-agent-manager.git
+
+# Push to GitHub
+git push -u origin main
+
+# Set webhook (after Railway deployment)
+python scripts/set_webhook.py set https://YOUR_RAILWAY_URL/telegram/webhook
+
+# Check webhook status
+python scripts/set_webhook.py info
+```
+
+## Next Steps After Deployment
+
+1. ✅ Test all commands (`/help`, `/status`, `/ingest`)
+2. ✅ Test approval flow (Approve/Reject buttons)
+3. ✅ Verify state persistence (restart service, check state survives)
+4. ✅ Monitor Railway logs
+5. ✅ Set up monitoring/alerting if needed
 
 ---
 
-**You're all set! 🎉 Deploy when ready!**
+**Need help?** Check `RAILWAY_DEPLOY.md` for detailed troubleshooting.
