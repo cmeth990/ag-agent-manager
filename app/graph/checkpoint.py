@@ -24,6 +24,13 @@ def create_checkpointer() -> PostgresSaver:
     """
     database_url = get_database_url()
     
+    # Convert postgresql:// to postgresql+psycopg:// to use psycopg3
+    # This avoids needing psycopg2-binary
+    if database_url.startswith("postgresql://") or database_url.startswith("postgres://"):
+        # Replace postgresql:// with postgresql+psycopg:// to use psycopg3
+        database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+        database_url = database_url.replace("postgres://", "postgresql+psycopg://", 1)
+    
     # Create engine with NullPool for serverless environments (Railway)
     engine = create_engine(
         database_url,
