@@ -86,7 +86,12 @@ async def telegram_webhook(request: Request):
                 logger.info(f"Graph execution completed for {chat_id}, intent: {result.get('intent')}")
             except Exception as e:
                 logger.error(f"Error running graph: {e}", exc_info=True)
-                await send_message(chat_id, f"❌ Error processing command: {str(e)[:200]}")
+                # Clean error message - remove newlines and special chars
+                error_msg = str(e).replace('\n', ' ').replace('\r', ' ')[:200]
+                try:
+                    await send_message(chat_id, f"❌ Error processing command: {error_msg}")
+                except Exception as send_err:
+                    logger.error(f"Failed to send error message: {send_err}")
                 return JSONResponse({"ok": True})
             
             # Check if approval is required
