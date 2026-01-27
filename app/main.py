@@ -52,6 +52,8 @@ async def telegram_webhook(request: Request):
     try:
         update = await request.json()
         logger.info(f"Received update: {update.get('update_id')}")
+        logger.info(f"Update keys: {list(update.keys())}")
+        logger.info(f"Full update: {update}")
         
         # Handle message
         if "message" in update:
