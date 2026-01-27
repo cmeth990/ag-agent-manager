@@ -249,8 +249,17 @@ def get_graph():
     """Get or create the compiled graph."""
     global _graph
     if _graph is None:
+        logger.info("Building graph from scratch...")
         _graph = build_graph()
+        logger.info("Graph built successfully")
     return _graph
+
+
+def reset_graph():
+    """Reset the cached graph (for testing/debugging)."""
+    global _graph
+    _graph = None
+    logger.info("Graph cache reset")
 
 
 async def run_graph(
