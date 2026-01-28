@@ -12,6 +12,10 @@ def get_bot_token() -> str:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
+    # Clean token - remove any whitespace/newlines that might have been added
+    token = token.strip()
+    # Remove any newlines or carriage returns
+    token = token.replace('\n', '').replace('\r', '')
     return token
 
 
@@ -33,15 +37,19 @@ async def send_message(
     Returns:
         API response dict
     """
-    # Clean text - remove any problematic characters that could break URLs
+    # Clean text - Telegram API can handle newlines in message text
+    # But ensure no other problematic control characters
     if text:
-        # Remove newlines and other control characters that could break JSON/URL encoding
-        text = text.replace('\r\n', '\n').replace('\r', '\n')  # Normalize line endings
-        # Telegram API can handle \n in text, but we need to ensure no other control chars
+        # Normalize line endings
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        # Remove any control characters except newline and tab (Telegram supports these)
         text = ''.join(char for char in text if ord(char) >= 32 or char in '\n\t')
     
     token = get_bot_token()
-    url = f"{TELEGRAM_API_BASE}{token}/sendMessage"
+    # Ensure URL is clean - no newlines in token or base URL
+    base_url = TELEGRAM_API_BASE.strip().replace('\n', '').replace('\r', '')
+    clean_token = token.strip().replace('\n', '').replace('\r', '')
+    url = f"{base_url}{clean_token}/sendMessage"
     
     payload = {
         "chat_id": chat_id,
