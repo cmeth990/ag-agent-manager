@@ -3,7 +3,7 @@ Circular citation detection: "self-confirming loops" (agents cite each other).
 Detects when agents create circular references that reinforce each other.
 """
 import logging
-from typing import Dict, Any, List, Set
+from typing import Dict, Any, List, Set, Optional
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
