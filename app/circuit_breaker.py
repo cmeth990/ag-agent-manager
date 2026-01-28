@@ -190,3 +190,13 @@ def check_domain_allowed(domain: str) -> bool:
 def check_source_allowed(source: str) -> bool:
     """Use before calling a source (e.g. semantic_scholar, arxiv). Returns False if source is paused."""
     return CircuitBreakerRegistry.allow_source(source)
+
+
+def record_source_success(source: str) -> None:
+    """Call after a source request succeeds."""
+    CircuitBreakerRegistry.record_source_success(source)
+
+
+def record_source_failure(source: str) -> None:
+    """Call after a source request fails."""
+    CircuitBreakerRegistry.record_source_failure(source)
