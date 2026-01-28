@@ -18,7 +18,8 @@ from app.graph.parallel_agents import parallel_agents_node
 from app.graph.improvement_agent import (
     improvement_agent_node,
     apply_improvements,
-    reject_improvements
+    reject_improvements,
+    push_changes_node
 )
 from app.graph.checkpoint import create_checkpointer
 
@@ -96,6 +97,8 @@ def detect_intent(state: AgentState) -> Dict[str, Any]:
         intent = "status"
     elif user_input.startswith("/cancel"):
         intent = "cancel"
+    elif user_input.startswith("/push") or "push to github" in user_input or "push changes" in user_input:
+        intent = "push_changes"
     elif user_input.startswith("/improve") or "improve" in user_input or "make it better" in user_input or "fix" in user_input or "add" in user_input:
         # Check if it's a conversational improvement request
         # Look for improvement-related keywords
@@ -140,7 +143,9 @@ You can also message me naturally to request improvements:
 • "Fix the domain scout to filter out more false positives"
 • "Add better error handling to the parallel agents"
 
-I'll analyze your request, propose changes, and ask for approval before making them.
+I'll analyze your request, propose changes, ask for approval, and automatically push to GitHub when approved.
+
+/push - Push committed changes to GitHub
 
 Examples:
 /ingest topic=photosynthesis
@@ -228,6 +233,7 @@ def build_graph():
     workflow.add_node("improve", improvement_agent_node)
     workflow.add_node("apply_improvements", apply_improvements)
     workflow.add_node("reject_improvements", reject_improvements)
+    workflow.add_node("push_changes", push_changes_node)
     
     # Add conditional edges from detect_intent
     def route_after_intent(state: AgentState) -> str:
@@ -240,6 +246,8 @@ def build_graph():
             return "cancel"
         elif intent == "improve":
             return "improve"
+        elif intent == "push_changes":
+            return "push_changes"
         elif intent == "gather_sources":
             return "gather_sources"
         elif intent == "fetch_content":
@@ -284,6 +292,7 @@ def build_graph():
     workflow.add_edge("handle_reject", END)
     workflow.add_edge("apply_improvements", END)
     workflow.add_edge("reject_improvements", END)
+    workflow.add_edge("push_changes", END)
     
     # Terminal nodes
     workflow.add_edge("help", END)

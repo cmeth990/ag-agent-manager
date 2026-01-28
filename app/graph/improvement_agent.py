@@ -286,15 +286,45 @@ async def apply_improvements(state: AgentState) -> Dict[str, Any]:
         
         logger.info(f"Committed changes: {commit_message}")
         
-        return {
-            "final_response": (
-                f"✅ **Improvements Applied Successfully!**\n\n"
-                f"📝 **Modified Files:** {len(applied_files)}\n"
-                f"{chr(10).join(f'  • {f}' for f in applied_files)}\n\n"
-                f"💾 **Committed:** {commit_message}\n\n"
-                f"💡 **Next Step:** Push changes with `git push` or ask me to push them."
+        # Try to push to GitHub
+        push_success = False
+        push_error = None
+        try:
+            push_result = subprocess.run(
+                ["git", "push"],
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=True,
+                text=True
             )
-        }
+            push_success = True
+            logger.info("Pushed changes to GitHub successfully")
+        except subprocess.CalledProcessError as e:
+            push_error = e.stderr if e.stderr else str(e)
+            logger.warning(f"Git push failed: {push_error}")
+        
+        if push_success:
+            return {
+                "final_response": (
+                    f"✅ **Improvements Applied & Pushed to GitHub!**\n\n"
+                    f"📝 **Modified Files:** {len(applied_files)}\n"
+                    f"{chr(10).join(f'  • {f}' for f in applied_files)}\n\n"
+                    f"💾 **Committed:** {commit_message}\n"
+                    f"🚀 **Pushed to GitHub:** Successfully\n\n"
+                    f"✨ Changes are now live on GitHub!"
+                )
+            }
+        else:
+            return {
+                "final_response": (
+                    f"✅ **Improvements Applied & Committed!**\n\n"
+                    f"📝 **Modified Files:** {len(applied_files)}\n"
+                    f"{chr(10).join(f'  • {f}' for f in applied_files)}\n\n"
+                    f"💾 **Committed:** {commit_message}\n"
+                    f"⚠️ **Push to GitHub failed:** {push_error[:200] if push_error else 'Unknown error'}\n\n"
+                    f"💡 You can push manually with `git push` or ask me to try again."
+                )
+            }
     except subprocess.CalledProcessError as e:
         logger.error(f"Git operation failed: {e}")
         return {
@@ -317,3 +347,68 @@ async def reject_improvements(state: AgentState) -> Dict[str, Any]:
         "approval_required": False,
         "final_response": "❌ **Improvements Rejected**\n\nNo changes were made to the codebase."
     }
+
+
+async def push_changes_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Push committed changes to GitHub.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "push"],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        
+        logger.info("Successfully pushed changes to GitHub")
+        
+        return {
+            "final_response": (
+                "🚀 **Pushed to GitHub Successfully!**\n\n"
+                "✅ All committed changes have been pushed to the remote repository.\n"
+                "✨ Your changes are now live on GitHub!"
+            )
+        }
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr if e.stderr else str(e)
+        logger.error(f"Git push failed: {error_msg}")
+        
+        # Check if there are uncommitted changes
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True
+        )
+        
+        has_uncommitted = bool(status_result.stdout.strip())
+        
+        if has_uncommitted:
+            return {
+                "error": "Uncommitted changes detected",
+                "final_response": (
+                    "⚠️ **Cannot Push**\n\n"
+                    "There are uncommitted changes in your working directory.\n"
+                    "Please commit your changes first, then try pushing again."
+                )
+            }
+        else:
+            return {
+                "error": f"Push failed: {error_msg[:200]}",
+                "final_response": (
+                    f"❌ **Push to GitHub Failed**\n\n"
+                    f"Error: {error_msg[:200]}\n\n"
+                    "Possible causes:\n"
+                    "• No remote repository configured\n"
+                    "• Authentication issues\n"
+                    "• Network connectivity problems"
+                )
+            }
+    except Exception as e:
+        logger.error(f"Unexpected error during git push: {e}")
+        return {
+            "error": str(e),
+            "final_response": f"❌ **Error:** {str(e)[:200]}"
+        }
