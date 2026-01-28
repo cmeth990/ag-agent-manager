@@ -1,4 +1,7 @@
 """FastAPI server with Telegram webhook endpoint."""
+import sys
+# Flush stderr immediately so Railway shows logs (Python buffers otherwise)
+print("[startup] main.py loading", file=sys.stderr, flush=True)
 import asyncio
 import os
 import logging
@@ -22,12 +25,15 @@ from app.task_state import set_task_status, TaskStatus, TaskStateRegistry
 load_dotenv()
 
 
-# Configure logging
+# Configure logging to stderr so Railway captures it (use PYTHONUNBUFFERED=1 in Procfile)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stderr,
+    force=True,
 )
 logger = logging.getLogger(__name__)
+logger.info("App module loaded")
 
 # Durable queue: when True and DATABASE_URL set, webhook enqueues and worker processes
 USE_DURABLE_QUEUE = os.getenv("USE_DURABLE_QUEUE", "false").lower() == "true"
