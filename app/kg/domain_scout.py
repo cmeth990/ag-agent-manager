@@ -323,29 +323,48 @@ def is_likely_domain_name(text: str, existing_domains: Set[str]) -> bool:
     if text.lower() in existing_domains:
         return False
     
-    # Skip generic terms
+    # Skip generic terms (expanded list)
     generic_terms = [
         "home", "about", "contact", "login", "sign up", "search", "menu",
         "introduction", "overview", "welcome", "learn more", "read more",
-        "click here", "next", "previous", "back", "skip"
+        "click here", "next", "previous", "back", "skip", "give now",
+        "help", "faq", "faqs", "for individuals", "for businesses", "for universities",
+        "for governments", "join for free", "log in", "sign in", "register",
+        "terms", "privacy", "cookie", "accessibility", "sitemap", "careers",
+        "blog", "news", "events", "support", "documentation", "api"
     ]
-    if text.lower() in generic_terms:
+    if text.lower().strip() in generic_terms:
         return False
+    
+    # Skip navigation/UI elements
+    if any(nav_term in text.lower() for nav_term in ["&amp;", "&", "amp;", "faqs", "faq"]):
+        if text.lower() in ["help & faqs", "help &amp; faqs", "help and faqs"]:
+            return False
     
     # Skip if too many numbers or special chars
     if len(re.findall(r'[0-9]', text)) > len(text) * 0.3:
         return False
     
     # Skip URLs
-    if text.startswith("http") or "/" in text or "." in text and len(text.split(".")) > 2:
+    if text.startswith("http") or "/" in text or ("." in text and len(text.split(".")) > 2):
         return False
+    
+    # Skip if it's clearly navigation (repeated words, all caps, etc.)
+    words = text.split()
+    if len(words) > 1 and words[0].lower() == words[-1].lower():
+        return False  # "Arts and HumanitiesArts and Humanities"
+    
+    if text.isupper() and len(text) > 10:
+        return False  # All caps navigation
     
     # Look for educational keywords
     educational_keywords = [
         "algebra", "calculus", "biology", "chemistry", "physics", "history",
         "literature", "programming", "computer", "science", "mathematics",
         "engineering", "medicine", "law", "business", "economics", "art",
-        "music", "language", "philosophy", "psychology", "sociology"
+        "music", "language", "philosophy", "psychology", "sociology", "data",
+        "statistics", "machine learning", "artificial intelligence", "design",
+        "architecture", "geography", "political", "anthropology", "linguistics"
     ]
     
     text_lower = text.lower()
@@ -353,8 +372,9 @@ def is_likely_domain_name(text: str, existing_domains: Set[str]) -> bool:
     
     # Or looks like a course/subject name (2-4 words, title case or mixed)
     looks_like_course = (
-        2 <= len(text.split()) <= 4 and
-        (text[0].isupper() or any(c.isupper() for c in text))
+        2 <= len(words) <= 4 and
+        (text[0].isupper() or any(c.isupper() for c in text)) and
+        not text.lower().startswith("for ")  # Skip "For X" navigation
     )
     
     return has_educational_keyword or looks_like_course

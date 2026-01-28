@@ -123,8 +123,19 @@ def rank_sources_by_priority(
     ranked = []
     
     for source in sources:
-        # Get quality score (already calculated)
-        quality = source.get("quality_score", 0.5)
+        # Get quality score (already calculated) - ensure it's a float
+        quality_raw = source.get("quality_score", 0.5)
+        if isinstance(quality_raw, dict):
+            # If quality_score is a dict with 'score' key
+            quality = float(quality_raw.get("score", 0.5))
+        elif isinstance(quality_raw, (int, float)):
+            quality = float(quality_raw)
+        else:
+            # Try to convert string to float, default to 0.5
+            try:
+                quality = float(quality_raw) if quality_raw else 0.5
+            except (ValueError, TypeError):
+                quality = 0.5
         
         # Calculate cost
         cost = calculate_source_cost(source)
