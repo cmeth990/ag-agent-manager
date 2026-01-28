@@ -62,9 +62,9 @@ async def discover_sources_for_domain(
         logger.warning(f"Domain {domain_name} not found in taxonomy")
         domain_info = {"domain_name": domain_name, "category_key": None}
     
-    # Get quality threshold for domain
+    # Get quality threshold for domain (always get thresholds for recommendations)
+    thresholds = get_domain_quality_threshold(domain_name)
     if min_quality is None:
-        thresholds = get_domain_quality_threshold(domain_name)
         min_quality = thresholds.get("min_source_quality", 0.55)
     
     # Generate search queries for domain

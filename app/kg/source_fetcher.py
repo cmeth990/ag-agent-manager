@@ -137,8 +137,16 @@ def rank_sources_by_priority(
             except (ValueError, TypeError):
                 quality = 0.5
         
-        # Calculate cost
-        cost = calculate_source_cost(source)
+        # Calculate cost - ensure it's always a float
+        cost_raw = calculate_source_cost(source)
+        if isinstance(cost_raw, (int, float)):
+            cost = float(cost_raw)
+        else:
+            try:
+                cost = float(cost_raw) if cost_raw else 0.3
+            except (ValueError, TypeError):
+                cost = 0.3  # Default medium cost
+        
         source["cost_score"] = cost
         
         # Calculate priority (higher is better)
