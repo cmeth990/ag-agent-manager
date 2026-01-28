@@ -50,6 +50,12 @@ In Railway project → Your service → **Variables** tab, add:
 | `USE_DURABLE_QUEUE` | `true` — use Postgres queue and background worker |
 | `ADMIN_API_KEY` | Secret key for telemetry/queue/kg admin endpoints (header `X-Admin-Key` or `Authorization: Bearer <key>`) |
 
+**If logs don’t show in Railway**
+
+| Variable | Value |
+|----------|-------|
+| `PYTHONUNBUFFERED` | `1` — makes Python output show up in Railway logs |
+
 ## 🚀 Step 5: Wait for Deployment
 
 1. Railway will automatically:
