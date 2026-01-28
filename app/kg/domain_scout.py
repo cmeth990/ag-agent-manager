@@ -111,19 +111,24 @@ async def scout_domains_from_free_sources(
     all_discovered = []
     source_results = {}
     
-    # Scout free educational sources
-    for source_name, source_config in SCOUT_SOURCES["free_educational"].items():
+    # Scout free educational sources (limit to first 3 to avoid timeout)
+    sources_to_scout = list(SCOUT_SOURCES["free_educational"].items())[:3]
+    for source_name, source_config in sources_to_scout:
         if not source_config.get("enabled", False):
             continue
         
         logger.info(f"Scouting {source_name}...")
         
         try:
-            discovered = await scout_source(
-                source_name=source_name,
-                source_config=source_config,
-                existing_domains=existing_domains,
-                max_domains=max_domains_per_source
+            # Add timeout per source
+            discovered = await asyncio.wait_for(
+                scout_source(
+                    source_name=source_name,
+                    source_config=source_config,
+                    existing_domains=existing_domains,
+                    max_domains=max_domains_per_source
+                ),
+                timeout=30.0  # 30 second timeout per source
             )
             
             source_results[source_name] = discovered
@@ -131,6 +136,12 @@ async def scout_domains_from_free_sources(
             
             logger.info(f"  Found {len(discovered.get('domains', []))} potential new domains from {source_name}")
         
+        except asyncio.TimeoutError:
+            logger.warning(f"Scouting {source_name} timed out after 30 seconds")
+            source_results[source_name] = {
+                "domains": [],
+                "error": "Timeout after 30 seconds"
+            }
         except Exception as e:
             logger.error(f"Error scouting {source_name}: {e}")
             source_results[source_name] = {
@@ -228,16 +239,26 @@ async def scout_web_source(
                     simple_domains = extract_domains_simple(html, source_name, existing_domains)
                     discovered.extend(simple_domains)
                     
-                    # Then use LLM for more complex extraction
-                    if len(discovered) < max_domains:
-                        llm_domains = await extract_domains_from_html(html, source_name, existing_domains)
-                        # Add LLM domains that aren't already found
-                        existing_names = {d["domain_name"].lower() for d in discovered}
-                        for domain in llm_domains:
-                            if domain["domain_name"].lower() not in existing_names:
-                                discovered.append(domain)
-                                if len(discovered) >= max_domains:
-                                    break
+                    # Only use LLM if we haven't found enough domains via simple parsing
+                    # AND limit to one LLM call per source to avoid excessive API usage
+                    if len(discovered) < max_domains * 0.5:  # Only if we found less than 50% of target
+                        try:
+                            # Add timeout to LLM call
+                            llm_domains = await asyncio.wait_for(
+                                extract_domains_from_html(html, source_name, existing_domains),
+                                timeout=30.0  # 30 second timeout for LLM extraction
+                            )
+                            # Add LLM domains that aren't already found
+                            existing_names = {d["domain_name"].lower() for d in discovered}
+                            for domain in llm_domains:
+                                if domain["domain_name"].lower() not in existing_names:
+                                    discovered.append(domain)
+                                    if len(discovered) >= max_domains:
+                                        break
+                        except asyncio.TimeoutError:
+                            logger.warning(f"LLM extraction timed out for {source_name}, using simple parsing results only")
+                        except Exception as e:
+                            logger.warning(f"LLM extraction failed for {source_name}: {e}, using simple parsing results only")
                     
                     # Limit to max_domains
                     discovered = discovered[:max_domains]
@@ -403,8 +424,8 @@ async def scout_reddit(
                 "User-Agent": "DomainScoutBot/1.0 (Educational Research)"
             }
             
-            for subreddit in subreddits[:3]:  # Limit to avoid rate limits
-                url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=25"
+            for subreddit in subreddits[:2]:  # Limit to 2 subreddits
+                url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=10"  # Limit to 10 posts
                 
                 try:
                     async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
@@ -412,21 +433,39 @@ async def scout_reddit(
                             data = await response.json()
                             posts = data.get("data", {}).get("children", [])
                             
-                            # Extract domains from post titles and content
-                            for post in posts:
+                            # Batch posts together to reduce LLM calls
+                            post_texts = []
+                            for post in posts[:10]:  # Limit to 10 posts
                                 post_data = post.get("data", {})
                                 title = post_data.get("title", "")
-                                selftext = post_data.get("selftext", "")
-                                
-                                # Use LLM to extract domain names
-                                text = f"{title}\n{selftext}"
-                                domains = await extract_domains_from_text(text, existing_domains, source="reddit")
-                                
-                                for domain_info in domains:
-                                    if domain_info["domain_name"] not in [d["domain_name"] for d in discovered]:
-                                        discovered.append(domain_info)
-                                        if len(discovered) >= max_domains:
-                                            break
+                                selftext = post_data.get("selftext", "")[:500]  # Limit text length
+                                if title:
+                                    post_texts.append(title)
+                            
+                            # Combine posts and extract domains in one LLM call with timeout
+                            if post_texts:
+                                combined_text = "\n".join(post_texts[:10])  # Max 10 posts
+                                try:
+                                    domains = await asyncio.wait_for(
+                                        extract_domains_from_text(
+                                            combined_text, 
+                                            existing_domains, 
+                                            source="reddit"
+                                        ),
+                                        timeout=20.0  # 20 second timeout per subreddit
+                                    )
+                                    
+                                    for domain_info in domains:
+                                        if domain_info["domain_name"] not in [d["domain_name"] for d in discovered]:
+                                            discovered.append(domain_info)
+                                            if len(discovered) >= max_domains:
+                                                break
+                                except asyncio.TimeoutError:
+                                    logger.warning(f"Reddit domain extraction timed out for {subreddit}")
+                                    continue
+                                except Exception as e:
+                                    logger.warning(f"Error extracting domains from Reddit {subreddit}: {e}")
+                                    continue
                         
                         await asyncio.sleep(1)  # Rate limiting
                 
@@ -750,19 +789,24 @@ async def scout_social_media(
     all_discovered = []
     source_results = {}
     
-    # Scout social media sources
-    for source_name, source_config in SCOUT_SOURCES["social_media"].items():
+    # Scout social media sources (limit to first 1 to avoid timeout)
+    sources_to_scout = list(SCOUT_SOURCES["social_media"].items())[:1]
+    for source_name, source_config in sources_to_scout:
         if not source_config.get("enabled", False):
             continue
         
         logger.info(f"Scouting {source_name}...")
         
         try:
-            discovered = await scout_source(
-                source_name=source_name,
-                source_config=source_config,
-                existing_domains=existing_domains,
-                max_domains=max_domains
+            # Add timeout per source
+            discovered = await asyncio.wait_for(
+                scout_source(
+                    source_name=source_name,
+                    source_config=source_config,
+                    existing_domains=existing_domains,
+                    max_domains=max_domains
+                ),
+                timeout=40.0  # 40 second timeout for social media (Reddit can be slow)
             )
             
             source_results[source_name] = discovered
@@ -770,6 +814,12 @@ async def scout_social_media(
             
             logger.info(f"  Found {len(discovered.get('domains', []))} potential new domains from {source_name}")
         
+        except asyncio.TimeoutError:
+            logger.warning(f"Scouting {source_name} timed out after 40 seconds")
+            source_results[source_name] = {
+                "domains": [],
+                "error": "Timeout after 40 seconds"
+            }
         except Exception as e:
             logger.error(f"Error scouting {source_name}: {e}")
             source_results[source_name] = {

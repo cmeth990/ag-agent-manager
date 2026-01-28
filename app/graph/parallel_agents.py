@@ -113,7 +113,7 @@ async def parallel_agents_node(state: AgentState) -> Dict[str, Any]:
     scout_progress = {"status": "starting", "message": None}
     
     async def run_source_gatherer():
-        """Run source gatherer with progress updates."""
+        """Run source gatherer with progress updates and timeout."""
         try:
             source_progress["status"] = "running"
             if chat_id:
@@ -123,7 +123,11 @@ async def parallel_agents_node(state: AgentState) -> Dict[str, Any]:
                     f"   Searching for sources: {domain}"
                 )
             
-            result = await source_gatherer_node(source_state)
+            # Add timeout to prevent hanging
+            result = await asyncio.wait_for(
+                source_gatherer_node(source_state),
+                timeout=120.0  # 2 minute timeout
+            )
             source_progress["status"] = "completed"
             source_progress["message"] = result.get("final_response", "Completed")
             
@@ -135,8 +139,19 @@ async def parallel_agents_node(state: AgentState) -> Dict[str, Any]:
                 )
             
             return result
+        except asyncio.TimeoutError:
+            logger.error("Source gatherer timed out after 2 minutes")
+            source_progress["status"] = "timeout"
+            source_progress["message"] = "Timeout after 2 minutes"
+            if chat_id:
+                await send_progress_update(
+                    chat_id,
+                    f"⏱️ **Source Gatherer** timed out\n"
+                    f"   Taking too long, stopping..."
+                )
+            return {"error": "Timeout", "final_response": "Source gathering timed out after 2 minutes"}
         except Exception as e:
-            logger.error(f"Source gatherer error: {e}")
+            logger.error(f"Source gatherer error: {e}", exc_info=True)
             source_progress["status"] = "error"
             source_progress["message"] = str(e)
             if chat_id:
@@ -147,7 +162,7 @@ async def parallel_agents_node(state: AgentState) -> Dict[str, Any]:
             return {"error": str(e), "final_response": None}
     
     async def run_domain_scout():
-        """Run domain scout with progress updates."""
+        """Run domain scout with progress updates and timeout."""
         try:
             scout_progress["status"] = "running"
             if chat_id:
@@ -157,7 +172,11 @@ async def parallel_agents_node(state: AgentState) -> Dict[str, Any]:
                     f"   Searching for new domains..."
                 )
             
-            result = await domain_scout_node(scout_state)
+            # Add timeout to prevent hanging
+            result = await asyncio.wait_for(
+                domain_scout_node(scout_state),
+                timeout=120.0  # 2 minute timeout
+            )
             scout_progress["status"] = "completed"
             scout_progress["message"] = result.get("final_response", "Completed")
             
@@ -169,8 +188,19 @@ async def parallel_agents_node(state: AgentState) -> Dict[str, Any]:
                 )
             
             return result
+        except asyncio.TimeoutError:
+            logger.error("Domain scout timed out after 2 minutes")
+            scout_progress["status"] = "timeout"
+            scout_progress["message"] = "Timeout after 2 minutes"
+            if chat_id:
+                await send_progress_update(
+                    chat_id,
+                    f"⏱️ **Domain Scout** timed out\n"
+                    f"   Taking too long, stopping..."
+                )
+            return {"error": "Timeout", "final_response": "Domain scouting timed out after 2 minutes"}
         except Exception as e:
-            logger.error(f"Domain scout error: {e}")
+            logger.error(f"Domain scout error: {e}", exc_info=True)
             scout_progress["status"] = "error"
             scout_progress["message"] = str(e)
             if chat_id:
@@ -180,12 +210,15 @@ async def parallel_agents_node(state: AgentState) -> Dict[str, Any]:
                 )
             return {"error": str(e), "final_response": None}
     
-    # Run both agents in parallel
+    # Run both agents in parallel with overall timeout
     try:
-        source_result, scout_result = await asyncio.gather(
-            run_source_gatherer(),
-            run_domain_scout(),
-            return_exceptions=True
+        source_result, scout_result = await asyncio.wait_for(
+            asyncio.gather(
+                run_source_gatherer(),
+                run_domain_scout(),
+                return_exceptions=True
+            ),
+            timeout=180.0  # 3 minute overall timeout
         )
         
         # Handle exceptions
@@ -194,8 +227,18 @@ async def parallel_agents_node(state: AgentState) -> Dict[str, Any]:
         if isinstance(scout_result, Exception):
             scout_result = {"error": str(scout_result), "final_response": None}
         
+    except asyncio.TimeoutError:
+        logger.error("Parallel execution timed out after 3 minutes")
+        if chat_id:
+            await send_progress_update(
+                chat_id,
+                f"⏱️ **Overall timeout**\n"
+                f"   Both agents exceeded 3 minute limit"
+            )
+        source_result = {"error": "Overall timeout", "final_response": "Execution timed out after 3 minutes"}
+        scout_result = {"error": "Overall timeout", "final_response": "Execution timed out after 3 minutes"}
     except Exception as e:
-        logger.error(f"Parallel execution error: {e}")
+        logger.error(f"Parallel execution error: {e}", exc_info=True)
         source_result = {"error": str(e), "final_response": None}
         scout_result = {"error": str(e), "final_response": None}
     
