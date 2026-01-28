@@ -196,7 +196,7 @@ def calculate_source_quality(
         recommendations.append("Academic sources should have DOI for verification")
     
     return {
-        "quality_score": round(quality_score, 3),
+        "quality_score": float(round(quality_score, 3)),
         "components": {
             "type_score": round(q_type, 3),
             "credibility_score": round(q_credibility, 3),

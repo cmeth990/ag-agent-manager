@@ -92,13 +92,24 @@ async def discover_sources_for_domain(
     evaluated_sources = []
     for source in all_sources:
         quality_result = calculate_source_quality(source, domain_name, domain_info)
-        source["quality_score"] = quality_result["quality_score"]
-        source["quality_components"] = quality_result["components"]
-        source["domain_relevance"] = quality_result["domain_relevance"]
-        source["recommendations"] = quality_result["recommendations"]
+        # Ensure quality_score is always a float
+        quality_score = quality_result.get("quality_score", 0.5)
+        if isinstance(quality_score, (int, float)):
+            quality_score = float(quality_score)
+        else:
+            # Try to convert string to float, default to 0.5
+            try:
+                quality_score = float(quality_score) if quality_score else 0.5
+            except (ValueError, TypeError):
+                quality_score = 0.5
+        
+        source["quality_score"] = quality_score
+        source["quality_components"] = quality_result.get("components", {})
+        source["domain_relevance"] = quality_result.get("domain_relevance", 0.5)
+        source["recommendations"] = quality_result.get("recommendations", [])
         
         # Only include if meets quality threshold
-        if source["quality_score"] >= min_quality:
+        if quality_score >= min_quality:
             evaluated_sources.append(source)
     
     # Rank by priority (quality and cost)
