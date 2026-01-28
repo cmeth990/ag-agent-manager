@@ -33,6 +33,13 @@ async def send_message(
     Returns:
         API response dict
     """
+    # Clean text - remove any problematic characters that could break URLs
+    if text:
+        # Remove newlines and other control characters that could break JSON/URL encoding
+        text = text.replace('\r\n', '\n').replace('\r', '\n')  # Normalize line endings
+        # Telegram API can handle \n in text, but we need to ensure no other control chars
+        text = ''.join(char for char in text if ord(char) >= 32 or char in '\n\t')
+    
     token = get_bot_token()
     url = f"{TELEGRAM_API_BASE}{token}/sendMessage"
     
