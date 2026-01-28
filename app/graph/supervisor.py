@@ -156,13 +156,21 @@ Improve error handling in the source discovery module
 
 
 def status_node(state: AgentState) -> Dict[str, Any]:
-    """Handle /status command."""
-    status = "✅ Bot is running\n"
+    """
+    Handle /status command.
+    Uses telemetry (not chat memory) to summarize system state.
+    """
+    from app.telemetry.aggregator import get_system_state, summarize_state
+    
+    # Get comprehensive state from telemetry
+    system_state = get_system_state()
+    summary = summarize_state(system_state)
+    
+    # Add current task status if available
     if state.get("approval_required"):
-        status += f"⏳ Waiting for approval (diff_id: {state.get('diff_id', 'unknown')})"
-    else:
-        status += "Ready for commands"
-    return {"final_response": status}
+        summary += f"\n\n⏳ **Current Task:** Waiting for approval (diff_id: {state.get('diff_id', 'unknown')})"
+    
+    return {"final_response": summary}
 
 
 def cancel_node(state: AgentState) -> Dict[str, Any]:

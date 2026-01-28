@@ -8,6 +8,11 @@ import asyncio
 from typing import Dict, List, Any, Optional, Tuple
 from urllib.parse import urlparse
 import re
+from app.security.network import is_url_allowed
+from app.security.sanitize import sanitize_content
+from app.failure_modes.html_parser import parse_html_with_fallback
+from app.failure_modes.paywall import detect_paywall
+from app.cost.cache import get_cache, cached
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +185,7 @@ def get_cost_tier(cost_score: float) -> str:
         return "high"
 
 
+@cached("fetched_doc", ttl_seconds=86400, key_func=lambda source, max_length=10000: (source.get("url"), max_length))
 async def fetch_source_content(
     source: Dict[str, Any],
     max_length: int = 10000
@@ -207,6 +213,14 @@ async def fetch_source_content(
             "accessible": False
         }
     
+    # Network egress control: only fetch from allowlisted domains
+    if not is_url_allowed(url):
+        return {
+            "content": None,
+            "metadata": {"error": "URL not in network allowlist", "url": url},
+            "accessible": False
+        }
+    
     try:
         async with aiohttp.ClientSession() as session:
             # Set headers to avoid blocking
@@ -219,10 +233,33 @@ async def fetch_source_content(
                 if response.status == 200:
                     content = await response.text()
                     
-                    # Extract text content (simple extraction - can be enhanced)
-                    text_content = extract_text_from_html(content)
+                    # Paywall detection: check if content is behind paywall
+                    paywall_check = detect_paywall(content, url=url)
+                    if paywall_check.get("is_paywall"):
+                        logger.warning(f"Paywall detected for {url}: {paywall_check.get('message')}")
+                        return {
+                            "content": None,
+                            "metadata": {
+                                "status": response.status,
+                                "error": "Paywall detected",
+                                "url": url,
+                                "paywall_confidence": paywall_check.get("confidence", 0.0),
+                            },
+                            "accessible": False
+                        }
                     
-                    # Truncate if too long
+                    # HTML parser with fallback: graceful degradation when parser breaks
+                    parsed = parse_html_with_fallback(content)
+                    text_content = parsed.get("content", "")
+                    
+                    # Content sanitization: strip scripts, hidden text, dangerous URIs
+                    # (parse_html_with_fallback already does basic sanitization, but do full sanitize)
+                    text_content = sanitize_content(
+                        text_content,
+                        content_type="text",  # Already extracted text
+                        max_length=max_length,
+                    )
+                    
                     if len(text_content) > max_length:
                         text_content = text_content[:max_length] + "..."
                     

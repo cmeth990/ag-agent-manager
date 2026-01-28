@@ -1,10 +1,13 @@
 """FastAPI server with Telegram webhook endpoint."""
+import asyncio
 import os
 import logging
-from typing import Dict, Any
+from contextlib import asynccontextmanager
+from typing import Dict, Any, Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import Depends, FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
+from app.auth import require_admin_key
 import uvicorn
 from app.telegram import (
     send_message,
@@ -13,6 +16,7 @@ from app.telegram import (
 )
 from app.graph.supervisor import run_graph
 from app.graph.state import AgentState
+from app.task_state import set_task_status, TaskStatus, TaskStateRegistry
 
 # Load environment variables from .env file
 load_dotenv()
@@ -25,7 +29,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Telegram KG Manager Bot")
+# Durable queue: when True and DATABASE_URL set, webhook enqueues and worker processes
+USE_DURABLE_QUEUE = os.getenv("USE_DURABLE_QUEUE", "false").lower() == "true"
+_worker_task: Optional[asyncio.Task] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start background worker when durable queue is enabled."""
+    global _worker_task
+    if USE_DURABLE_QUEUE and os.getenv("DATABASE_URL"):
+        from app.queue.worker import start_worker_background, TASK_TYPE_GRAPH_RUN
+        _worker_task = start_worker_background(task_type=TASK_TYPE_GRAPH_RUN)
+        logger.info("Durable queue worker started")
+    yield
+    if _worker_task and not _worker_task.done():
+        _worker_task.cancel()
+        try:
+            await _worker_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Durable queue worker stopped")
+
+
+app = FastAPI(title="Telegram KG Manager Bot", lifespan=lifespan)
 
 
 @app.get("/")
@@ -38,6 +65,101 @@ async def root():
 async def health():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.get("/telemetry/tasks", dependencies=[Depends(require_admin_key)])
+async def telemetry_tasks(limit: int = 20):
+    """
+    Telemetry: recent task states (for supervisor/state summarization).
+    Does not rely on chat memory.
+    """
+    tasks = TaskStateRegistry.list_recent(limit=limit)
+    return {"tasks": tasks, "count": len(tasks)}
+
+
+@app.get("/telemetry/state", dependencies=[Depends(require_admin_key)])
+async def telemetry_state():
+    """
+    Comprehensive system state from telemetry.
+    Supervisor can query this instead of relying on chat memory.
+    """
+    from app.telemetry.aggregator import get_system_state
+    return get_system_state()
+
+
+@app.get("/telemetry/summary", dependencies=[Depends(require_admin_key)])
+async def telemetry_summary():
+    """
+    Human-readable summary of system state from telemetry.
+    """
+    from app.telemetry.aggregator import summarize_state
+    return {"summary": summarize_state()}
+
+
+@app.get("/kg/versions", dependencies=[Depends(require_admin_key)])
+async def list_kg_versions(limit: int = 20):
+    """
+    List recent KG versions (changelog).
+    """
+    from app.kg.rollback import list_versions
+    return await list_versions(limit=limit)
+
+
+@app.get("/kg/versions/{version}", dependencies=[Depends(require_admin_key)])
+async def get_kg_version(version: int):
+    """
+    Get information about a specific KG version.
+    """
+    from app.kg.rollback import get_version_info
+    info = await get_version_info(version)
+    if not info:
+        raise HTTPException(status_code=404, detail=f"Version {version} not found")
+    return info
+
+
+@app.post("/kg/rollback/{target_version}", dependencies=[Depends(require_admin_key)])
+async def rollback_kg(target_version: int):
+    """
+    Rollback KG to a specific version.
+    
+    Args:
+        target_version: Version number to rollback to (0 = initial state)
+    """
+    from app.kg.rollback import rollback_to_version
+    result = await rollback_to_version(target_version)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Rollback failed"))
+    return result
+
+
+@app.get("/queue/dead-letter", dependencies=[Depends(require_admin_key)])
+async def list_dead_letter_queue(limit: int = 50):
+    """List tasks in dead-letter queue (for triage)."""
+    from app.queue.triage import list_dead_letter_tasks
+    tasks = await list_dead_letter_tasks(limit=limit)
+    return {"tasks": tasks, "count": len(tasks)}
+
+
+@app.post("/queue/triage/{task_id}", dependencies=[Depends(require_admin_key)])
+async def triage_task(task_id: str, action: str = "retry", updated_payload: Optional[Dict[str, Any]] = None):
+    """
+    Triage a dead-letter queue task.
+    
+    Actions: "retry", "update_payload", "skip"
+    """
+    from app.queue.triage import triage_dead_letter_task
+    result = await triage_dead_letter_task(task_id, action, updated_payload=updated_payload)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Triage failed"))
+    return result
+
+
+@app.get("/queue/stuck", dependencies=[Depends(require_admin_key)])
+async def list_stuck_tasks(threshold_minutes: int = 30):
+    """List stuck tasks (no heartbeat recently)."""
+    from app.queue.heartbeat import monitor_stuck_tasks
+    result = await monitor_stuck_tasks(stuck_threshold_minutes=threshold_minutes, auto_retry=False)
+    return result
 
 
 @app.post("/telegram/webhook")
@@ -81,12 +203,33 @@ async def telegram_webhook(request: Request):
                 "error": None
             }
             
-            # Run graph
-            thread_id = str(chat_id)  # Use chat_id as thread_id for persistence
+            # Durable queue: enqueue and return; worker will run graph and send response
+            if USE_DURABLE_QUEUE and os.getenv("DATABASE_URL"):
+                try:
+                    from app.queue.durable_queue import get_queue
+                    from app.queue.worker import TASK_TYPE_GRAPH_RUN
+                    queue = get_queue()
+                    payload = dict(initial_state)
+                    task_id = queue.enqueue(
+                        TASK_TYPE_GRAPH_RUN,
+                        payload,
+                        agent="supervisor",
+                        max_retries=3,
+                    )
+                    logger.info(f"Enqueued task {task_id} for chat_id {chat_id}")
+                    return JSONResponse({"ok": True, "queued": True, "task_id": task_id})
+                except Exception as e:
+                    logger.error(f"Enqueue failed, falling back to inline: {e}")
+            
+            # Inline: run graph and send response
+            thread_id = str(chat_id)
+            set_task_status(thread_id, TaskStatus.IN_PROGRESS, agent="supervisor")
             try:
                 result = await run_graph(initial_state, thread_id)
+                set_task_status(thread_id, TaskStatus.COMPLETED, agent="supervisor")
                 logger.info(f"Graph execution completed for {chat_id}, intent: {result.get('intent')}")
             except Exception as e:
+                set_task_status(thread_id, TaskStatus.FAILED, error=str(e)[:500])
                 logger.error(f"Error running graph: {e}", exc_info=True)
                 # Clean error message - remove newlines and special chars
                 error_msg = str(e).replace('\n', ' ').replace('\r', ' ')[:200]

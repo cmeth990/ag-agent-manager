@@ -5,6 +5,7 @@ Discovers and evaluates sources for domains.
 import logging
 from typing import Dict, Any, List
 from app.graph.state import AgentState
+from app.validation.agent_outputs import validate_source_gatherer_output, ValidationError
 from app.kg.source_discovery import discover_sources_for_domain
 from app.kg.source_fetcher import (
     gather_domain_content_prioritized,
@@ -14,7 +15,8 @@ from app.kg.source_fetcher import (
 from app.kg.domains import get_domain_by_name, get_domains_by_category
 from app.kg.scoring import calculate_source_quality, get_domain_quality_threshold
 from app.kg.knowledge_base import generate_id, NODE_TYPES
-from app.llm.client import get_llm
+from app.llm.tiering import get_llm_for_task
+from app.security.prompt_injection import wrap_untrusted_content
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +69,10 @@ async def source_gatherer_node(state: AgentState) -> Dict[str, Any]:
     user_input = state.get("user_input", "")
     logger.info(f"Source gathering request: {user_input[:100]}...")
     
-    # Extract domain(s) from user input using LLM
-    llm = get_llm()
+    # Cheap tier: source_filtering uses smaller model
+    domain = (state.get("discovered_sources") or {}).get("domains", [None])[0] if isinstance(state.get("discovered_sources"), dict) else None
+    queue = state.get("queue", "source_gathering")
+    llm = get_llm_for_task("source_filtering", domain=domain, queue=queue, agent="source_gatherer")
     
     # Get available domains for context
     available_domains = []
@@ -79,32 +83,43 @@ async def source_gatherer_node(state: AgentState) -> Dict[str, Any]:
     except:
         pass
     
-    prompt = SOURCE_GATHERING_PROMPT.format(
-        user_input=user_input,
-        available_domains=", ".join(available_domains[:20])
-    )
+    if not llm:
+        domains = extract_domains_from_text(user_input, available_domains)
+        search_queries = [d for d in domains]
+        source_types = ["academic", "educational", "general"]
+        requirements = {}
+    else:
+        # Prompt injection defense: treat user input as untrusted
+        safe_input = wrap_untrusted_content(user_input, max_length=10_000)
+        prompt = SOURCE_GATHERING_PROMPT.format(
+            user_input=safe_input,
+            available_domains=", ".join(available_domains[:20])
+        )
     
     try:
-        response = await llm.ainvoke(prompt)
-        if hasattr(response, 'content'):
-            content = response.content
+        if llm:
+            response = await llm.ainvoke(prompt)
+            if hasattr(response, 'content'):
+                content = response.content
+            else:
+                content = str(response)
+            import json
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                domains = parsed.get("domains", [])
+                search_queries = parsed.get("search_queries", [])
+                source_types = parsed.get("source_types", ["academic", "educational", "general"])
+                requirements = parsed.get("requirements", {})
+            else:
+                domains = extract_domains_from_text(user_input, available_domains)
+                search_queries = [d for d in domains]
+                source_types = ["academic", "educational", "general"]
+                requirements = {}
         else:
-            content = str(response)
-        
-        # Parse JSON response
-        import json
-        import re
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group())
-            domains = parsed.get("domains", [])
-            search_queries = parsed.get("search_queries", [])
-            source_types = parsed.get("source_types", ["academic", "educational", "general"])
-            requirements = parsed.get("requirements", {})
-        else:
-            # Fallback: try to extract domain names from text
             domains = extract_domains_from_text(user_input, available_domains)
-            search_queries = [d for d in domains]  # Use domain names as queries
+            search_queries = [d for d in domains]
             source_types = ["academic", "educational", "general"]
             requirements = {}
     except Exception as e:
@@ -115,9 +130,13 @@ async def source_gatherer_node(state: AgentState) -> Dict[str, Any]:
         requirements = {}
     
     if not domains:
-        return {
+        out = {
             "final_response": f"❌ Could not identify domain(s) from: {user_input}\n\nPlease specify a domain name, e.g., 'gather sources for Algebra' or 'find sources for Machine Learning'."
         }
+        try:
+            return validate_source_gatherer_output(out)
+        except ValidationError:
+            return out
     
     # Discover sources for each domain
     all_discovered = {}
@@ -214,10 +233,18 @@ async def source_gatherer_node(state: AgentState) -> Dict[str, Any]:
         }
     }
     
-    return {
+    out = {
         "discovered_sources": discovered_sources,
         "final_response": "\n".join(response_parts)
     }
+    try:
+        return validate_source_gatherer_output(out)
+    except ValidationError as e:
+        logger.warning(f"Source gatherer output validation failed: {e}")
+        return {
+            "error": str(e),
+            "final_response": f"❌ Validation error: {e}. Please try again or use a different domain."
+        }
 
 
 def extract_domains_from_text(text: str, available_domains: List[str]) -> List[str]:

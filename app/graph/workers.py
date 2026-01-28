@@ -5,6 +5,8 @@ import uuid
 from typing import Dict, Any
 from app.graph.state import AgentState
 from app.kg.diff import create_diff_id, create_empty_diff, format_diff_summary
+from app.kg.provenance import enrich_diff_with_provenance
+from app.security.prompt_injection import wrap_untrusted_content
 from app.kg.knowledge_base import (
     NODE_TYPES, EDGE_TYPES, generate_id, validate_id, get_node_type_from_id,
     SCHEMA_SUMMARY, KG_STATE, ORP_SCALES, CATEGORY_TAXONOMY_AVAILABLE
@@ -26,6 +28,17 @@ else:
     def get_orp_role_by_category(category_key: str) -> str | None:
         return None
 from app.llm.client import get_llm
+from app.cost.cheap_verification import should_use_llm, simple_ner, statistical_extraction
+from app.cost.cache import get_cache, cached
+from app.llm.tiering import get_llm_for_task, TIER_CHEAP, TIER_MID
+from app.validation.agent_outputs import (
+    validate_extractor_output,
+    validate_linker_output,
+    validate_writer_output,
+    validate_commit_output,
+    validate_query_output,
+    ValidationError as OutputValidationError,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -105,6 +118,7 @@ Current KG State: 175 concepts, 615 edges, 100% metadata coverage
 Extract:
 1. **Entities**: Concepts, Claims, Evidence, Sources, Hypernodes, Processes
    - Each entity should have: id (with proper prefix), label (node type), properties (name, description, domain, scale, etc.)
+   - **Provenance (required)**: Every Claim must link back to evidence. Either set properties.sourceId (Source id) or properties.evidenceIds (list of Evidence ids), or add SUPPORTS relations from Evidence nodes to the Claim.
 2. **Relations**: Connections using proper edge types
    - Each relation should have: from (entity id), to (entity id), type (edge type), properties (optional)
 3. **ORP Structure**: Identify objects, relations, and processes
@@ -140,7 +154,8 @@ JSON:"""
 
 async def extractor_node(state: AgentState) -> Dict[str, Any]:
     """
-    Extract entities, relations, and claims from user input using LLM.
+    Extract entities, relations, and claims from user input.
+    Uses cheap verification first, only uses LLM if needed.
     
     Input: user_input
     Output: Extracted entities/relations in structured format
@@ -148,101 +163,164 @@ async def extractor_node(state: AgentState) -> Dict[str, Any]:
     user_input = state.get("user_input", "")
     logger.info(f"Extracting from input: {user_input[:100]}...")
     
-    llm = get_llm()
+    # Cheap verification: check if we can extract without LLM
+    use_llm, confidence, cheap_results = should_use_llm(user_input, confidence_threshold=0.7)
     
-    if not llm:
-        # Fallback to simple extraction if no LLM available
-        logger.warning("No LLM available, using fallback extraction")
+    # Check cache first
+    cache = get_cache()
+    cached_extraction = cache.get("extraction_result", user_input)
+    
+    if cached_extraction:
+        logger.info("Using cached extraction result")
+        extracted = cached_extraction
+    elif not use_llm:
+        # Cheap extraction sufficient
+        logger.info(f"Using cheap extraction (confidence: {confidence:.2f})")
+        # Build simple extraction from NER and statistics
+        ner = cheap_results.get("ner", {})
+        stats = cheap_results.get("statistics", {})
+        
+        # Extract topic name
         topic_name = user_input.split("=")[-1].strip() if "=" in user_input else user_input
+        if ner.get("proper_nouns"):
+            topic_name = ner["proper_nouns"][0] if ner["proper_nouns"] else topic_name
+        
         extracted = {
             "entities": [
                 {
-                    "id": f"entity_{uuid.uuid4().hex[:8]}",
-                    "label": "Topic",
-                    "properties": {"name": topic_name, "description": f"Topic: {topic_name}"}
+                    "id": generate_id("Concept"),
+                    "label": "Concept",
+                    "properties": {
+                        "name": topic_name,
+                        "description": f"Topic: {topic_name}",
+                        "domain": "general",
+                        "extraction_method": "cheap_verification",
+                        "confidence": confidence,
+                    }
                 }
             ],
             "relations": [],
             "claims": []
         }
-    else:
+        
+        # Structured output validation (guardrails)
         try:
-            # Use LLM for extraction
-            prompt = EXTRACTION_PROMPT.format(user_input=user_input)
-            response = await llm.ainvoke(prompt)
-            
-            # Parse JSON response
-            content = response.content.strip()
-            # Remove markdown code blocks if present
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-            
-            extracted = json.loads(content)
-            
-            # Ensure all entities have proper IDs with prefixes
-            for i, entity in enumerate(extracted.get("entities", [])):
-                if "id" not in entity:
-                    label = entity.get("label", "Concept")
-                    # Map common labels to node types
-                    label_map = {
-                        "Person": "Concept",
-                        "Topic": "Concept",
-                        "Entity": "Concept"
+            extracted = validate_extractor_output(extracted)
+        except OutputValidationError as ve:
+            logger.warning(f"Extractor output validation: {ve}; using as-is with truncation")
+        cache.set("extraction_result", extracted, ttl_seconds=86400, user_input=user_input)
+    else:
+        # LLM extraction needed
+        logger.info(f"Using LLM extraction (confidence: {confidence:.2f})")
+        
+        # Use tiered model: extraction is mid-tier task
+        llm = get_llm_for_task("extraction", domain=None, queue=None, agent="extractor")
+        if not llm:
+            llm = get_llm()  # Fallback to base LLM
+        
+        if not llm:
+            # Fallback to simple extraction if no LLM available
+            logger.warning("No LLM available, using fallback extraction")
+            topic_name = user_input.split("=")[-1].strip() if "=" in user_input else user_input
+            extracted = {
+                "entities": [
+                    {
+                        "id": f"entity_{uuid.uuid4().hex[:8]}",
+                        "label": "Topic",
+                        "properties": {"name": topic_name, "description": f"Topic: {topic_name}"}
                     }
-                    node_type = label_map.get(label, label)
-                    if node_type in NODE_TYPES:
+                ],
+                "relations": [],
+                "claims": []
+            }
+        else:
+            try:
+                # Prompt injection defense: treat user input as untrusted data
+                safe_input = wrap_untrusted_content(user_input, max_length=20_000)
+                prompt = EXTRACTION_PROMPT.format(user_input=safe_input)
+                response = await llm.ainvoke(prompt)
+                
+                # Parse JSON response
+                content = response.content.strip()
+                # Remove markdown code blocks if present
+                if content.startswith("```json"):
+                    content = content[7:]
+                if content.startswith("```"):
+                    content = content[3:]
+                if content.endswith("```"):
+                    content = content[:-3]
+                content = content.strip()
+                
+                extracted = json.loads(content)
+                
+                # Cache LLM extraction result
+                cache = get_cache()
+                cache.set("extraction_result", extracted, ttl_seconds=86400, user_input=user_input)
+                
+                # Ensure all entities have proper IDs with prefixes
+                for i, entity in enumerate(extracted.get("entities", [])):
+                    if "id" not in entity:
+                        label = entity.get("label", "Concept")
+                        # Map common labels to node types
+                        label_map = {
+                            "Person": "Concept",
+                            "Topic": "Concept",
+                            "Entity": "Concept"
+                        }
+                        node_type = label_map.get(label, label)
+                        if node_type in NODE_TYPES:
+                            entity["id"] = generate_id(node_type)
+                        else:
+                            # Default to Concept if unknown
+                            entity["id"] = generate_id("Concept")
+                    # Validate and fix ID format if needed
+                    elif not validate_id(entity["id"]):
+                        # If ID doesn't match format, generate new one
+                        label = entity.get("label", "Concept")
+                        label_map = {"Person": "Concept", "Topic": "Concept", "Entity": "Concept"}
+                        node_type = label_map.get(label, label)
+                        if node_type not in NODE_TYPES:
+                            node_type = "Concept"
                         entity["id"] = generate_id(node_type)
-                    else:
-                        # Default to Concept if unknown
-                        entity["id"] = generate_id("Concept")
-                # Validate and fix ID format if needed
-                elif not validate_id(entity["id"]):
-                    # If ID doesn't match format, generate new one
-                    label = entity.get("label", "Concept")
-                    label_map = {"Person": "Concept", "Topic": "Concept", "Entity": "Concept"}
-                    node_type = label_map.get(label, label)
-                    if node_type not in NODE_TYPES:
-                        node_type = "Concept"
-                    entity["id"] = generate_id(node_type)
-            
-            logger.info(f"Extracted {len(extracted.get('entities', []))} entities, {len(extracted.get('relations', []))} relations")
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response as JSON: {e}")
-            logger.debug(f"Response content: {response.content if 'response' in locals() else 'N/A'}")
-            # Fallback extraction with proper KG ID format
-            topic_name = user_input.split("=")[-1].strip() if "=" in user_input else user_input
-            extracted = {
-                "entities": [
-                    {
-                        "id": generate_id("Concept"),
-                        "label": "Concept",
-                        "properties": {"name": topic_name, "description": f"Topic: {topic_name}", "domain": "general"}
-                    }
-                ],
-                "relations": [],
-                "claims": []
-            }
-        except Exception as e:
-            logger.error(f"Error in LLM extraction: {e}", exc_info=True)
-            # Fallback extraction with proper KG ID format
-            topic_name = user_input.split("=")[-1].strip() if "=" in user_input else user_input
-            extracted = {
-                "entities": [
-                    {
-                        "id": generate_id("Concept"),
-                        "label": "Concept",
-                        "properties": {"name": topic_name, "description": f"Topic: {topic_name}", "domain": "general"}
-                    }
-                ],
-                "relations": [],
-                "claims": []
-            }
+                
+                logger.info(f"Extracted {len(extracted.get('entities', []))} entities, {len(extracted.get('relations', []))} relations")
+                # Structured output validation (guardrails)
+                try:
+                    extracted = validate_extractor_output(extracted)
+                except OutputValidationError as ve:
+                    logger.warning(f"Extractor output validation: {ve}; using as-is")
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse LLM response as JSON: {e}")
+                logger.debug(f"Response content: {response.content if 'response' in locals() else 'N/A'}")
+                # Fallback extraction with proper KG ID format
+                topic_name = user_input.split("=")[-1].strip() if "=" in user_input else user_input
+                extracted = {
+                    "entities": [
+                        {
+                            "id": generate_id("Concept"),
+                            "label": "Concept",
+                            "properties": {"name": topic_name, "description": f"Topic: {topic_name}", "domain": "general"}
+                        }
+                    ],
+                    "relations": [],
+                    "claims": []
+                }
+            except Exception as e:
+                logger.error(f"Error in LLM extraction: {e}", exc_info=True)
+                # Fallback extraction with proper KG ID format
+                topic_name = user_input.split("=")[-1].strip() if "=" in user_input else user_input
+                extracted = {
+                    "entities": [
+                        {
+                            "id": generate_id("Concept"),
+                            "label": "Concept",
+                            "properties": {"name": topic_name, "description": f"Topic: {topic_name}", "domain": "general"}
+                        }
+                    ],
+                    "relations": [],
+                    "claims": []
+                }
     
     return {
         "working_notes": {
@@ -371,6 +449,11 @@ async def linker_node(state: AgentState) -> Dict[str, Any]:
         "relations": linked_relations,
         "canonical_ids": canonical_ids
     }
+    # Structured output validation (guardrails)
+    try:
+        linked = validate_linker_output(linked)
+    except OutputValidationError as ve:
+        logger.warning(f"Linker output validation: {ve}; using as-is")
     
     logger.info(f"Linked to {len(set(canonical_ids.values()))} unique entities")
     
@@ -510,15 +593,24 @@ def writer_node(state: AgentState) -> Dict[str, Any]:
     
     diff["metadata"]["source"] = state.get("user_input")
     diff["metadata"]["reason"] = f"User requested: {state.get('intent', 'unknown')}"
-    
+    enrich_diff_with_provenance(
+        diff,
+        source_agent="writer_node",
+        source_document=state.get("user_input"),
+        reasoning=f"Extraction from user input; intent: {state.get('intent', 'unknown')}",
+    )
     logger.info(f"Generated diff {diff_id}: {format_diff_summary(diff)}")
-    
-    return {
+    out = {
         "proposed_diff": diff,
         "diff_id": diff_id,
         "approval_required": True,
         "final_response": f"📝 Proposed KG changes:\n\n{format_diff_summary(diff)}\n\nPlease review and approve or reject."
     }
+    try:
+        validate_writer_output(out)
+    except OutputValidationError as ve:
+        logger.warning(f"Writer output validation: {ve}")
+    return out
 
 
 async def commit_node(state: AgentState) -> Dict[str, Any]:
@@ -561,16 +653,21 @@ async def commit_node(state: AgentState) -> Dict[str, Any]:
         response = f"✅ Committed to KG:\n\n{summary}\n\n"
         response += f"Nodes: +{result['nodes']['added']} ~{result['nodes']['updated']} -{result['nodes']['deleted']}\n"
         response += f"Edges: +{result['edges']['added']} ~{result['edges']['updated']} -{result['edges']['deleted']}"
-        return {
+        out = {
             "proposed_diff": None,
             "approval_required": False,
             "final_response": response
         }
     else:
-        return {
+        out = {
             "error": "Failed to commit diff",
             "final_response": "❌ Error committing changes. Please try again."
         }
+    try:
+        validate_commit_output(out)
+    except OutputValidationError as ve:
+        logger.warning(f"Commit output validation: {ve}")
+    return out
 
 
 def handle_reject_node(state: AgentState) -> Dict[str, Any]:
@@ -688,7 +785,12 @@ async def query_node(state: AgentState) -> Dict[str, Any]:
         response += "- /query scale to <node_id> <micro|meso|macro> - Query fractal scale\n"
         response += "- /query orp <node_id> - View ORP structure\n"
         
-        return {"final_response": response}
+        out = {"final_response": response}
+        try:
+            validate_query_output(out)
+        except OutputValidationError as ve:
+            logger.warning(f"Query output validation: {ve}")
+        return out
     
     except Exception as e:
         logger.error(f"Error querying KG: {e}", exc_info=True)

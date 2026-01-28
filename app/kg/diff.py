@@ -2,6 +2,7 @@
 from typing import Dict, Any, List, Optional
 import uuid
 from datetime import datetime
+from app.kg.provenance import enrich_diff_with_provenance
 
 
 def create_diff_id() -> str:

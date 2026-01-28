@@ -8,16 +8,25 @@ import asyncio
 from typing import Dict, List, Any, Optional
 from urllib.parse import quote, urlencode
 import json
+from app.retry import with_retry
+from app.queue.rate_limiter import check_rate_limit, record_request
 
 logger = logging.getLogger(__name__)
 
 
-async def search_semantic_scholar(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+@with_retry(max_retries=2, backoff_base=2.0, operation_name="search_semantic_scholar")
+async def search_semantic_scholar(query: str, limit: int = 10, domain: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Search Semantic Scholar API for academic papers.
     
     API: https://api.semanticscholar.org/graph/v1/paper/search
     """
+    # Rate limiting: check before making request
+    allowed, reason = check_rate_limit("semantic_scholar", domain=domain)
+    if not allowed:
+        logger.warning(f"Rate limited: {reason}")
+        return []  # Return empty instead of failing
+    
     sources = []
     
     try:
@@ -58,21 +67,34 @@ async def search_semantic_scholar(query: str, limit: int = 10) -> List[Dict[str,
                         sources.append(source)
                     
                     logger.info(f"Semantic Scholar: Found {len(sources)} papers for '{query}'")
+                    # Record successful request for rate limiting
+                    record_request("semantic_scholar", domain=domain)
                 else:
                     logger.warning(f"Semantic Scholar API returned status {response.status}")
+                    # Still record request (failed but counted)
+                    record_request("semantic_scholar", domain=domain)
     
     except Exception as e:
         logger.error(f"Error searching Semantic Scholar: {e}")
+        # Record failed request
+        record_request("semantic_scholar", domain=domain)
     
     return sources
 
 
-async def search_arxiv(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+@with_retry(max_retries=2, backoff_base=2.0, operation_name="search_arxiv")
+async def search_arxiv(query: str, limit: int = 10, domain: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Search arXiv API for preprints.
     
     API: http://export.arxiv.org/api/query
     """
+    # Rate limiting
+    allowed, reason = check_rate_limit("arxiv", domain=domain)
+    if not allowed:
+        logger.warning(f"Rate limited: {reason}")
+        return []
+    
     sources = []
     
     try:
@@ -129,21 +151,31 @@ async def search_arxiv(query: str, limit: int = 10) -> List[Dict[str, Any]]:
                             sources.append(source)
                     
                     logger.info(f"arXiv: Found {len(sources)} preprints for '{query}'")
+                    record_request("arxiv", domain=domain)
                 else:
                     logger.warning(f"arXiv API returned status {response.status}")
+                    record_request("arxiv", domain=domain)
     
     except Exception as e:
         logger.error(f"Error searching arXiv: {e}")
+        record_request("arxiv", domain=domain)
     
     return sources
 
 
-async def search_openalex(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+@with_retry(max_retries=2, backoff_base=2.0, operation_name="search_openalex")
+async def search_openalex(query: str, limit: int = 10, domain: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Search OpenAlex API for academic works.
     
     API: https://api.openalex.org/works
     """
+    # Rate limiting
+    allowed, reason = check_rate_limit("openalex", domain=domain)
+    if not allowed:
+        logger.warning(f"Rate limited: {reason}")
+        return []
+    
     sources = []
     
     try:
@@ -191,21 +223,31 @@ async def search_openalex(query: str, limit: int = 10) -> List[Dict[str, Any]]:
                         sources.append(source)
                     
                     logger.info(f"OpenAlex: Found {len(sources)} works for '{query}'")
+                    record_request("openalex", domain=domain)
                 else:
                     logger.warning(f"OpenAlex API returned status {response.status}")
+                    record_request("openalex", domain=domain)
     
     except Exception as e:
         logger.error(f"Error searching OpenAlex: {e}")
+        record_request("openalex", domain=domain)
     
     return sources
 
 
-async def search_wikipedia(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+@with_retry(max_retries=2, backoff_base=2.0, operation_name="search_wikipedia")
+async def search_wikipedia(query: str, limit: int = 5, domain: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Search Wikipedia for articles.
     
     API: https://en.wikipedia.org/api/rest_v1/page/summary/{title}
     """
+    # Rate limiting
+    allowed, reason = check_rate_limit("wikipedia", domain=domain)
+    if not allowed:
+        logger.warning(f"Rate limited: {reason}")
+        return []
+    
     sources = []
     
     try:
@@ -249,9 +291,11 @@ async def search_wikipedia(query: str, limit: int = 5) -> List[Dict[str, Any]]:
                                 pass  # Skip if summary fetch fails
                     
                     logger.info(f"Wikipedia: Found {len(sources)} articles for '{query}'")
+                    record_request("wikipedia", domain=domain)
     
     except Exception as e:
         logger.error(f"Error searching Wikipedia: {e}")
+        record_request("wikipedia", domain=domain)
     
     return sources
 

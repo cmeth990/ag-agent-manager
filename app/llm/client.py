@@ -7,7 +7,7 @@ from langchain_core.language_models import BaseChatModel
 logger = logging.getLogger(__name__)
 
 
-def get_llm() -> Optional[BaseChatModel]:
+def get_llm_base() -> Optional[BaseChatModel]:
     """
     Get configured LLM instance.
     
@@ -51,3 +51,66 @@ def get_llm() -> Optional[BaseChatModel]:
     
     logger.warning("No LLM API key found. Set OPENAI_API_KEY or ANTHROPIC_API_KEY")
     return None
+
+
+def get_llm(
+    domain: Optional[str] = None,
+    queue: Optional[str] = None,
+    agent: Optional[str] = None,
+) -> Optional[BaseChatModel]:
+    """
+    Get LLM instance with optional cost tracking.
+    
+    If domain/queue/agent are provided, returns a cost-tracked wrapper.
+    Otherwise returns the base LLM (for backward compatibility).
+    
+    Args:
+        domain: Domain name for cost tracking
+        queue: Queue name for cost tracking
+        agent: Agent name for cost tracking
+    
+    Returns:
+        LLM instance (tracked if context provided, otherwise base)
+    """
+    base_llm = get_llm_base()
+    if not base_llm:
+        return None
+    
+    # If no context provided, return base LLM (backward compatible)
+    if not domain and not queue and not agent:
+        return base_llm
+    
+    # Return tracked LLM wrapper
+    try:
+        from app.llm.tracked_client import get_tracked_llm
+        return get_tracked_llm(domain=domain, queue=queue, agent=agent)
+    except ImportError:
+        logger.warning("Cost tracking not available, returning base LLM")
+        return base_llm
+
+
+def get_llm_for_agent(state: dict, agent_name: str) -> Optional[BaseChatModel]:
+    """
+    Get cost-tracked LLM for an agent, extracting context from state.
+    
+    Args:
+        state: AgentState dict
+        agent_name: Name of the agent (e.g., "source_gatherer")
+    
+    Returns:
+        Tracked LLM instance or None
+    """
+    # Extract domain from state (common patterns)
+    domain = None
+    if "user_input" in state:
+        # Try to extract domain from user input or discovered_sources
+        discovered = state.get("discovered_sources", {})
+        if isinstance(discovered, dict):
+            domains = discovered.get("domains", [])
+            if domains:
+                domain = domains[0]  # Use first domain
+    
+    # Extract queue from state or use agent name
+    queue = state.get("queue", agent_name)
+    
+    return get_llm(domain=domain, queue=queue, agent=agent_name)

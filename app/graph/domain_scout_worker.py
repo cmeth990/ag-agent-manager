@@ -5,13 +5,14 @@ Discovers new domains not yet in the knowledge graph.
 import logging
 from typing import Dict, Any
 from app.graph.state import AgentState
+from app.validation.agent_outputs import validate_domain_scout_output, ValidationError
 from app.kg.domain_scout import (
     scout_domains_from_free_sources,
     scout_social_media,
     full_domain_scout,
     get_existing_domains
 )
-from app.llm.client import get_llm
+from app.llm.tiering import get_llm_for_task
 
 logger = logging.getLogger(__name__)
 
@@ -49,30 +50,35 @@ async def domain_scout_node(state: AgentState) -> Dict[str, Any]:
     user_input = state.get("user_input", "")
     logger.info(f"Domain scouting request: {user_input[:100]}...")
     
-    # Parse user intent
-    llm = get_llm()
-    prompt = SCOUT_PROMPT.format(user_input=user_input)
+    # Mid tier: domain_scouting for intent/params
+    llm = get_llm_for_task("domain_scouting", domain=None, queue="domain_scout", agent="domain_scout")
     
+    if not llm:
+        scout_free = True
+        scout_social = True
+        max_domains = 50
+    else:
+        prompt = SCOUT_PROMPT.format(user_input=user_input)
     try:
-        response = await llm.ainvoke(prompt)
-        if hasattr(response, 'content'):
-            content = response.content
-        else:
-            content = str(response)
-        
-        import json
-        import re
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group())
-            scout_free = parsed.get("scout_free", True)
-            scout_social = parsed.get("scout_social", True)
-            max_domains = parsed.get("max_domains", 50)
-        else:
-            # Defaults
-            scout_free = True
-            scout_social = True
-            max_domains = 50
+        if llm:
+            response = await llm.ainvoke(prompt)
+            if hasattr(response, 'content'):
+                content = response.content
+            else:
+                content = str(response)
+            import json
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                scout_free = parsed.get("scout_free", True)
+                scout_social = parsed.get("scout_social", True)
+                max_domains = parsed.get("max_domains", 50)
+            else:
+                scout_free = True
+                scout_social = True
+                max_domains = 50
+        # else: scout_free, scout_social, max_domains set above
     except Exception as e:
         logger.warning(f"Failed to parse LLM response: {e}, using defaults")
         scout_free = True
@@ -184,7 +190,15 @@ async def domain_scout_node(state: AgentState) -> Dict[str, Any]:
         "existing_domains_count": existing_count
     }
     
-    return {
+    out = {
         "scouting_results": scouting_results,
         "final_response": "\n".join(response_parts)
     }
+    try:
+        return validate_domain_scout_output(out)
+    except ValidationError as e:
+        logger.warning(f"Domain scout output validation failed: {e}")
+        return {
+            "error": str(e),
+            "final_response": f"❌ Validation error: {e}. Please try again."
+        }

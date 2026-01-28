@@ -7,7 +7,9 @@ from typing import Dict, Any
 from app.graph.state import AgentState
 from app.kg.source_fetcher import gather_domain_content_prioritized
 from app.kg.source_discovery import discover_sources_for_domain
-from app.llm.client import get_llm
+from app.llm.tiering import get_llm_for_task
+from app.security.prompt_injection import wrap_untrusted_content
+from app.validation.agent_outputs import validate_content_fetcher_parsed, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -44,30 +46,43 @@ async def content_fetcher_node(state: AgentState) -> Dict[str, Any]:
     # Check if we have discovered sources in state
     discovered_sources = state.get("discovered_sources", {})
     
-    # Extract domain and parameters using LLM
-    llm = get_llm()
-    prompt = CONTENT_FETCHING_PROMPT.format(user_input=user_input)
+    # Cheap tier: classification for domain/params extraction
+    domain = (state.get("discovered_sources") or {}).get("domains", [None])[0] if isinstance(state.get("discovered_sources"), dict) else None
+    llm = get_llm_for_task("classification", domain=domain, queue="content_fetch", agent="content_fetcher")
     
+    if not llm:
+        domains = extract_domains_from_text(user_input)
+        max_sources = 10
+        min_priority = 0.0
+    else:
+        safe_input = wrap_untrusted_content(user_input, max_length=10_000)
+        prompt = CONTENT_FETCHING_PROMPT.format(user_input=safe_input)
     try:
-        response = await llm.ainvoke(prompt)
-        if hasattr(response, 'content'):
-            content = response.content
+        if llm:
+            response = await llm.ainvoke(prompt)
+            if hasattr(response, 'content'):
+                content = response.content
+            else:
+                content = str(response)
+            import json
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                try:
+                    parsed = validate_content_fetcher_parsed(parsed)
+                except ValidationError as ve:
+                    logger.warning(f"Content fetcher parsed output validation: {ve}; using defaults")
+                    parsed = {"domains": [], "max_sources": 10, "min_priority": 0.0}
+                domains = parsed.get("domains", [])
+                max_sources = parsed.get("max_sources", 10)
+                min_priority = parsed.get("min_priority", 0.0)
+            else:
+                domains = extract_domains_from_text(user_input)
+                max_sources = 10
+                min_priority = 0.0
         else:
-            content = str(response)
-        
-        import json
-        import re
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group())
-            domains = parsed.get("domains", [])
-            max_sources = parsed.get("max_sources", 10)
-            min_priority = parsed.get("min_priority", 0.0)
-        else:
-            # Fallback: extract domain from text
-            domains = extract_domains_from_text(user_input)
-            max_sources = 10
-            min_priority = 0.0
+            pass  # domains, max_sources, min_priority set above
     except Exception as e:
         logger.warning(f"Failed to parse LLM response: {e}, using fallback")
         domains = extract_domains_from_text(user_input)

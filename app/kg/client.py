@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from app.kg.diff import format_diff_summary
 from app.kg.knowledge_base import NODE_TYPES, EDGE_TYPES, get_node_type_from_id
+from app.kg.idempotent import build_upsert_node_query, build_upsert_edge_query
 from app.kg.hypernode import (
     detect_orp_pattern, infer_scale_from_content,
     create_fractal_scaling_edge, create_mirror_edge
@@ -211,35 +212,97 @@ async def apply_diff(diff: Dict[str, Any]) -> Dict[str, Any]:
         edges_add = len(diff.get("edges", {}).get("add", []))
         edges_update = len(diff.get("edges", {}).get("update", []))
         edges_delete = len(diff.get("edges", {}).get("delete", []))
-        
         return {
             "success": True,
-            "nodes": {
-                "added": nodes_add,
-                "updated": nodes_update,
-                "deleted": nodes_delete
-            },
-            "edges": {
-                "added": edges_add,
-                "updated": edges_update,
-                "deleted": edges_delete
-            },
+            "nodes": {"added": nodes_add, "updated": nodes_update, "deleted": nodes_delete},
+            "edges": {"added": edges_add, "updated": edges_update, "deleted": edges_delete},
             "ids": [],
-            "errors": []
+            "errors": [],
+            "duplicates": {"nodes_skipped": 0, "edges_skipped": 0, "contradictions": 0, "recommendations": []},
         }
     
     logger.info(f"Applying KG diff: {format_diff_summary(diff)}")
     
-    nodes_add = diff.get("nodes", {}).get("add", [])
+    # Extract metadata for changelog
+    diff_id = diff.get("metadata", {}).get("diff_id") or diff.get("diff_id")
+    source_agent = diff.get("metadata", {}).get("provenance_agent")
+    source_document = diff.get("metadata", {}).get("source")
+    reason = diff.get("metadata", {}).get("reason")
+    
+    # Circular citation detection: prevent self-confirming loops
+    try:
+        from app.failure_modes.circular_citation import detect_circular_citations
+        circular_check = detect_circular_citations(diff)
+        if circular_check.get("has_circular"):
+            logger.warning(f"Circular citations detected: {circular_check.get('warnings', [])}")
+            # Optionally filter out edges that create cycles
+            # For now, just log warnings
+    except Exception as e:
+        logger.debug(f"Circular citation check skipped: {e}")
+
+    # Check for duplicates before applying
+    from app.kg.deduplication import check_diff_for_duplicates
+    duplicate_check = await check_diff_for_duplicates(diff, driver=driver)
+    
+    if duplicate_check["duplicate_nodes"]:
+        logger.warning(f"Found {len(duplicate_check['duplicate_nodes'])} duplicate nodes - will skip them")
+        for new_node, existing_node in duplicate_check["duplicate_nodes"]:
+            logger.info(f"  Skipping duplicate: {new_node.get('id')} (matches {existing_node.get('id')})")
+    
+    if duplicate_check["duplicate_edges"]:
+        logger.warning(f"Found {len(duplicate_check['duplicate_edges'])} duplicate edges - will skip them")
+    
+    if duplicate_check["contradictions"]:
+        logger.warning(f"Found {len(duplicate_check['contradictions'])} contradictions - will still add but review recommended")
+        for contradiction in duplicate_check["contradictions"]:
+            logger.warning(f"  Contradiction: {contradiction.get('reason', 'Unknown')}")
+    
+    # Filter out duplicate nodes/edges
+    duplicate_node_ids = {new.get("id") for new, _ in duplicate_check["duplicate_nodes"]}
+    duplicate_edge_keys = {
+        (e.get("from"), e.get("to"), e.get("type"))
+        for e, _ in duplicate_check["duplicate_edges"]
+    }
+    
+    nodes_add = [
+        n for n in diff.get("nodes", {}).get("add", [])
+        if n.get("id") not in duplicate_node_ids
+    ]
     nodes_update = diff.get("nodes", {}).get("update", [])
     nodes_delete = diff.get("nodes", {}).get("delete", [])
-    edges_add = diff.get("edges", {}).get("add", [])
+    edges_add = [
+        e for e in diff.get("edges", {}).get("add", [])
+        if (e.get("from"), e.get("to"), e.get("type")) not in duplicate_edge_keys
+    ]
     edges_update = diff.get("edges", {}).get("update", [])
     edges_delete = diff.get("edges", {}).get("delete", [])
-    
+
+    # Cross-source corroboration: optionally filter claims without 2+ sources
+    import os
+    enable_corroboration = os.getenv("SECURITY_REQUIRE_CORROBORATION", "false").lower() == "true"
+    if enable_corroboration:
+        try:
+            from app.security.corroboration import filter_diff_by_corroboration
+            diff = filter_diff_by_corroboration(diff, min_sources=2, require_for_claims_only=True)
+            # Re-filter after corroboration
+            nodes_add = diff.get("nodes", {}).get("add", [])
+            edges_add = diff.get("edges", {}).get("add", [])
+        except Exception as e:
+            logger.warning(f"Corroboration filter failed: {e}")
+
+    # Anomaly detection: flag surge of concepts from one domain
+    domain_from_metadata = (diff.get("metadata") or {}).get("source") or "unknown"
+    try:
+        from app.security.anomaly import check_ingestion_anomaly, record_ingestion
+        anomaly = check_ingestion_anomaly(domain_from_metadata, proposed_add_count=len(nodes_add))
+        if anomaly.get("is_anomaly"):
+            logger.warning(f"Anomaly: {anomaly.get('message', 'Suspicious ingestion surge')}")
+    except Exception as e:
+        logger.debug(f"Anomaly check skipped: {e}")
+
     created_ids = []
     errors = []
-    
+
     try:
         with driver.session() as session:
             # Add nodes
@@ -264,9 +327,9 @@ async def apply_diff(diff: Dict[str, Any]) -> Dict[str, Any]:
                     if "id" not in properties:
                         properties["id"] = node_id
                     
-                    # Create node with label and properties
-                    query = f"CREATE (n:{label} $properties) RETURN id(n) as node_id, n.id as entity_id"
-                    result = session.run(query, properties=properties)
+                    # Idempotent write: use MERGE (upsert) instead of CREATE
+                    query, params = build_upsert_node_query(node_id, label, properties)
+                    result = session.run(query, **params)
                     record = result.single()
                     if record:
                         neo4j_id = str(record["node_id"])
@@ -327,19 +390,9 @@ async def apply_diff(diff: Dict[str, Any]) -> Dict[str, Any]:
                     properties = edge.get("properties", {})
                     
                     # Find nodes by ID property or internal ID
-                    query = f"""
-                    MATCH (a), (b)
-                    WHERE (a.id = $from_id OR id(a) = $from_id)
-                      AND (b.id = $to_id OR id(b) = $to_id)
-                    CREATE (a)-[r:{rel_type} $properties]->(b)
-                    RETURN id(r) as rel_id
-                    """
-                    result = session.run(
-                        query,
-                        from_id=from_id,
-                        to_id=to_id,
-                        properties=properties
-                    )
+                    # Idempotent write: use MERGE (upsert) instead of CREATE
+                    query, params = build_upsert_edge_query(from_id, to_id, rel_type, properties)
+                    result = session.run(query, **params)
                     record = result.single()
                     if not record:
                         logger.warning(f"Could not create edge from {from_id} to {to_id}")
@@ -394,15 +447,29 @@ async def apply_diff(diff: Dict[str, Any]) -> Dict[str, Any]:
     
     except Exception as e:
         logger.error(f"Error applying diff: {e}", exc_info=True)
-        return {
+        result = {
             "success": False,
             "nodes": {"added": 0, "updated": 0, "deleted": 0},
             "edges": {"added": 0, "updated": 0, "deleted": 0},
             "ids": [],
             "errors": [str(e)]
         }
+        # Record failed change in changelog
+        try:
+            from app.kg.versioning import record_kg_change
+            record_kg_change(
+                diff=diff,
+                diff_id=diff_id,
+                source_agent=source_agent,
+                source_document=source_document,
+                reason=reason,
+                result=result,
+            )
+        except Exception as log_error:
+            logger.warning(f"Failed to record changelog: {log_error}")
+        return result
     
-    return {
+    result = {
         "success": len(errors) == 0,
         "nodes": {
             "added": len(nodes_add),
@@ -415,8 +482,38 @@ async def apply_diff(diff: Dict[str, Any]) -> Dict[str, Any]:
             "deleted": len(edges_delete)
         },
         "ids": created_ids,
-        "errors": errors
+        "errors": errors,
+        "duplicates": {
+            "nodes_skipped": len(duplicate_check["duplicate_nodes"]),
+            "edges_skipped": len(duplicate_check["duplicate_edges"]),
+            "contradictions": len(duplicate_check["contradictions"]),
+            "recommendations": duplicate_check["recommendations"],
+        }
     }
+
+    # Record ingestion for anomaly tracking (provenance-first)
+    if result.get("nodes", {}).get("added", 0) > 0:
+        try:
+            from app.security.anomaly import record_ingestion
+            record_ingestion(domain_from_metadata, count=result["nodes"]["added"])
+        except Exception as e:
+            logger.debug(f"record_ingestion skipped: {e}")
+
+    # Record successful change in changelog
+    try:
+        from app.kg.versioning import record_kg_change
+        record_kg_change(
+            diff=diff,
+            diff_id=diff_id,
+            source_agent=source_agent,
+            source_document=source_document,
+            reason=reason,
+            result=result,
+        )
+    except Exception as log_error:
+        logger.warning(f"Failed to record changelog: {log_error}")
+    
+    return result
 
 
 async def expand_hypernode(hypernode_id: str, depth: int = 1) -> Dict[str, Any]:

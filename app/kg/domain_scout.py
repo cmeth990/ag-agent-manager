@@ -12,6 +12,9 @@ import re
 import json
 from app.kg.domains import DOMAIN_TAXONOMY, get_domain_by_name, get_domains_by_category
 from app.llm.client import get_llm
+from app.security.network import is_url_allowed
+from app.security.sanitize import sanitize_content, sanitize_for_llm
+from app.security.prompt_injection import wrap_untrusted_content
 
 # Import re at module level
 import re
@@ -223,7 +226,12 @@ async def scout_web_source(
     """
     url = source_config.get("subjects_url") or source_config.get("base_url")
     discovered = []
-    
+
+    # Network egress control: only fetch from allowlisted domains
+    if not url or not is_url_allowed(url):
+        logger.warning(f"Domain scout: URL not in allowlist, skipping: {url}")
+        return {"discovered_domains": discovered, "statistics": {"sources_scouted": 0, "total_discovered": 0, "unique_domains": 0, "high_confidence": 0, "by_source": {}}}
+
     try:
         async with aiohttp.ClientSession() as session:
             headers = {
@@ -234,7 +242,8 @@ async def scout_web_source(
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as response:
                 if response.status == 200:
                     html = await response.text()
-                    
+                    # Content sanitization: strip scripts, hidden text
+                    html = sanitize_content(html, content_type="html", max_length=500_000)
                     # First, try simple HTML parsing for common patterns
                     simple_domains = extract_domains_simple(html, source_name, existing_domains)
                     discovered.extend(simple_domains)
@@ -525,12 +534,16 @@ async def extract_domains_from_html(
     # Create list of existing domains for context (sample)
     existing_sample = list(existing_domains)[:20] if len(existing_domains) > 20 else list(existing_domains)
     
+    # Prompt injection defense: treat fetched HTML/text as untrusted data
+    safe_text = sanitize_for_llm(text_content[:3000], max_length=3000)
+    wrapped_content = wrap_untrusted_content(safe_text, max_length=3000)
+    
     prompt = f"""You are analyzing content from {source_name} to identify NEW educational domains/topics that are NOT already in the knowledge graph.
 
 Existing domains (do NOT include these): {', '.join(existing_sample)}
 
 Content from {source_name}:
-{text_content[:3000]}
+{wrapped_content}
 
 Extract educational domain names (subjects, topics, courses) that appear in this content.
 Focus on:
@@ -661,12 +674,16 @@ async def extract_domains_from_text(
     # Sample existing domains for context
     existing_sample = list(existing_domains)[:20] if len(existing_domains) > 20 else list(existing_domains)
     
+    # Prompt injection defense: treat retrieved text as untrusted data
+    safe_text = sanitize_for_llm(text[:2000], max_length=2000)
+    wrapped_content = wrap_untrusted_content(safe_text, max_length=2000)
+    
     prompt = f"""Analyze this text from {source} to identify NEW educational domains/topics that people are learning or discussing.
 
 Existing domains (do NOT include): {', '.join(existing_sample)}
 
 Text:
-{text[:2000]}
+{wrapped_content}
 
 Extract educational domain names (subjects, topics, courses, skills) mentioned that are NOT in the existing list.
 Focus on domains that:

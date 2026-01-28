@@ -27,11 +27,28 @@
 
 In Railway project → Your service → **Variables** tab, add:
 
+**Required**
+
 | Variable | Value |
 |----------|-------|
-| `TELEGRAM_BOT_TOKEN` | `8467185687:AAGQXB0Ec5yxwN9SYsSl_xHvex5YHqEYNe4` |
+| `TELEGRAM_BOT_TOKEN` | Your bot token (e.g. from BotFather) |
+| `NEO4J_URI` | Neo4j bolt URL (e.g. `bolt://host:7687` or Neo4j Aura URI) |
+| `NEO4J_USER` | Neo4j username |
+| `NEO4J_PASSWORD` | Neo4j password |
+| `OPENAI_API_KEY` **or** `ANTHROPIC_API_KEY` | At least one LLM provider key |
 
-**Note:** `DATABASE_URL` is automatically set by Railway when you add Postgres - you don't need to set it manually.
+**Auto-set by Railway**
+
+| Variable | Note |
+|----------|------|
+| `DATABASE_URL` | Set automatically when you add Postgres — do not set manually |
+
+**Recommended for production**
+
+| Variable | Value |
+|----------|-------|
+| `USE_DURABLE_QUEUE` | `true` — use Postgres queue and background worker |
+| `ADMIN_API_KEY` | Secret key for telemetry/queue/kg admin endpoints (header `X-Admin-Key` or `Authorization: Bearer <key>`) |
 
 ## 🚀 Step 5: Wait for Deployment
 

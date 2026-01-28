@@ -8,6 +8,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from app.kg.domains import get_domain_by_name
 from app.kg.scoring import calculate_source_quality, get_domain_quality_threshold
+from app.circuit_breaker import check_source_allowed, record_source_success, record_source_failure
 
 logger = logging.getLogger(__name__)
 
@@ -293,28 +294,28 @@ async def discover_academic_sources(queries: List[str], domain_name: str) -> Lis
     # Use best query (first one, usually the domain name)
     query = queries[0] if queries else domain_name
     
-    # Run all academic API searches in parallel
+    # Run all academic API searches in parallel (skip providers blocked by circuit breaker)
     search_tasks = []
+    provider_keys = []
+    if SOURCE_PROVIDERS["academic"]["semantic_scholar"]["enabled"] and check_source_allowed("semantic_scholar"):
+        search_tasks.append(search_semantic_scholar(query, limit=5, domain=domain_name))
+        provider_keys.append("semantic_scholar")
+    if SOURCE_PROVIDERS["academic"]["arxiv"]["enabled"] and check_source_allowed("arxiv"):
+        search_tasks.append(search_arxiv(query, limit=5, domain=domain_name))
+        provider_keys.append("arxiv")
+    if SOURCE_PROVIDERS["academic"]["openalex"]["enabled"] and check_source_allowed("openalex"):
+        search_tasks.append(search_openalex(query, limit=5, domain=domain_name))
+        provider_keys.append("openalex")
     
-    if SOURCE_PROVIDERS["academic"]["semantic_scholar"]["enabled"]:
-        search_tasks.append(search_semantic_scholar(query, limit=5))
-    
-    if SOURCE_PROVIDERS["academic"]["arxiv"]["enabled"]:
-        search_tasks.append(search_arxiv(query, limit=5))
-    
-    if SOURCE_PROVIDERS["academic"]["openalex"]["enabled"]:
-        search_tasks.append(search_openalex(query, limit=5))
-    
-    # Execute searches in parallel
     if search_tasks:
         results = await asyncio.gather(*search_tasks, return_exceptions=True)
-        
         for i, result in enumerate(results):
+            key = provider_keys[i] if i < len(provider_keys) else "unknown"
             if isinstance(result, Exception):
-                provider_names = ["Semantic Scholar", "arXiv", "OpenAlex"]
-                provider_name = provider_names[i] if i < len(provider_names) else "Unknown"
-                logger.warning(f"{provider_name} search failed: {result}")
+                record_source_failure(key)
+                logger.warning(f"Academic source {key} search failed: {result}")
             else:
+                record_source_success(key)
                 for source in result:
                     source["properties"]["domain"] = domain_name
                 sources.extend(result)
@@ -341,28 +342,28 @@ async def discover_educational_sources(queries: List[str], domain_name: str) -> 
     # Use best query (first one, usually the domain name)
     query = queries[0] if queries else domain_name
     
-    # Run all educational API searches in parallel
+    # Run all educational API searches in parallel (skip providers blocked by circuit breaker)
     search_tasks = []
-    
-    if SOURCE_PROVIDERS["educational"]["openstax"]["enabled"]:
+    provider_keys = []
+    if SOURCE_PROVIDERS["educational"]["openstax"]["enabled"] and check_source_allowed("openstax"):
         search_tasks.append(search_openstax(query, limit=3))
-    
-    if SOURCE_PROVIDERS["educational"]["khan_academy"]["enabled"]:
+        provider_keys.append("openstax")
+    if SOURCE_PROVIDERS["educational"]["khan_academy"]["enabled"] and check_source_allowed("khan_academy"):
         search_tasks.append(search_khan_academy(query, limit=3))
-    
-    if SOURCE_PROVIDERS["educational"]["mit_ocw"]["enabled"]:
+        provider_keys.append("khan_academy")
+    if SOURCE_PROVIDERS["educational"]["mit_ocw"]["enabled"] and check_source_allowed("mit_ocw"):
         search_tasks.append(search_mit_ocw(query, limit=3))
+        provider_keys.append("mit_ocw")
     
-    # Execute searches in parallel
     if search_tasks:
         results = await asyncio.gather(*search_tasks, return_exceptions=True)
-        
         for i, result in enumerate(results):
+            key = provider_keys[i] if i < len(provider_keys) else "unknown"
             if isinstance(result, Exception):
-                provider_names = ["OpenStax", "Khan Academy", "MIT OCW"]
-                provider_name = provider_names[i] if i < len(provider_names) else "Unknown"
-                logger.warning(f"{provider_name} search failed: {result}")
+                record_source_failure(key)
+                logger.warning(f"Educational source {key} search failed: {result}")
             else:
+                record_source_success(key)
                 for source in result:
                     source["properties"]["domain"] = domain_name
                 sources.extend(result)
@@ -383,14 +384,15 @@ async def discover_general_sources(queries: List[str], domain_name: str) -> List
     from app.kg.api_clients import search_wikipedia
     
     for query in queries[:1]:  # Limit queries
-        # Search Wikipedia
-        if SOURCE_PROVIDERS["general"]["wikipedia"]["enabled"]:
+        if SOURCE_PROVIDERS["general"]["wikipedia"]["enabled"] and check_source_allowed("wikipedia"):
             try:
-                wiki_sources = await search_wikipedia(query, limit=3)
+                wiki_sources = await search_wikipedia(query, limit=3, domain=domain_name)
+                record_source_success("wikipedia")
                 for source in wiki_sources:
                     source["properties"]["domain"] = domain_name
                 sources.extend(wiki_sources)
             except Exception as e:
+                record_source_failure("wikipedia")
                 logger.warning(f"Wikipedia search failed: {e}")
     
     logger.info(f"Discovered {len(sources)} general sources for {domain_name}")

@@ -10,7 +10,9 @@ import re
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from app.graph.state import AgentState
-from app.llm.client import get_llm
+from app.llm.client import get_llm_for_agent
+from app.validation.agent_outputs import validate_improvement_agent_output, ValidationError
+from app.security.tools import require_tool, SecurityError
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ async def improvement_agent_node(state: AgentState) -> Dict[str, Any]:
     
     logger.info(f"Improvement agent processing request: {user_input[:100]}...")
     
-    llm = get_llm()
+    llm = get_llm_for_agent(state, agent_name="improvement_agent")
     
     # Step 1: Understand the request and plan changes
     analysis_prompt = f"""You are a code improvement agent. Analyze this user request and create a plan:
@@ -173,13 +175,21 @@ Respond with ONLY the complete modified file content in a code block:
     diff_summary = create_diff_summary(files_content, proposed_changes, plan)
     
     # Step 5: Store proposed changes and request approval
-    return {
+    out = {
         "proposed_changes": proposed_changes,
         "improvement_plan": plan,
         "approval_required": True,
         "diff_id": f"improve_{hash(user_input) % 10000}",
         "final_response": diff_summary
     }
+    try:
+        return validate_improvement_agent_output(out)
+    except ValidationError as e:
+        logger.warning(f"Improvement agent output validation failed: {e}")
+        return {
+            "error": str(e),
+            "final_response": f"❌ Validation error: {e}. Please try again with a clearer request."
+        }
 
 
 def create_diff_summary(
@@ -239,7 +249,17 @@ async def apply_improvements(state: AgentState) -> Dict[str, Any]:
     
     applied_files = []
     errors = []
-    
+
+    # Tool sandboxing: only approved tools (file_write) allowed
+    try:
+        require_tool("file_write")
+    except SecurityError as e:
+        logger.error(f"Security: {e}")
+        return {
+            "error": str(e),
+            "final_response": f"❌ Security: File write not allowed. {e}"
+        }
+
     # Apply changes to each file
     for file_path, new_content in proposed_changes.items():
         full_path = PROJECT_ROOT / file_path
@@ -265,7 +285,15 @@ async def apply_improvements(state: AgentState) -> Dict[str, Any]:
             "final_response": f"❌ Errors applying changes:\n" + "\n".join(errors)
         }
     
-    # Stage and commit changes
+    # Stage and commit changes (tool sandboxing: git_add_commit must be approved)
+    try:
+        require_tool("git_add_commit")
+    except SecurityError as e:
+        logger.error(f"Security: {e}")
+        return {
+            "error": str(e),
+            "final_response": f"❌ Security: Git operations not allowed. {e}"
+        }
     try:
         # Stage files
         subprocess.run(
