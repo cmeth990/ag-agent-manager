@@ -15,6 +15,11 @@ from app.graph.source_gatherer import source_gatherer_node
 from app.graph.content_fetcher import content_fetcher_node
 from app.graph.domain_scout_worker import domain_scout_node
 from app.graph.parallel_agents import parallel_agents_node
+from app.graph.improvement_agent import (
+    improvement_agent_node,
+    apply_improvements,
+    reject_improvements
+)
 from app.graph.checkpoint import create_checkpointer
 
 
@@ -32,13 +37,22 @@ def route_intent(state: AgentState) -> str:
     if state.get("approval_required") and not state.get("approval_decision"):
         return "wait_for_approval"
     
-    # If approval decision exists, route to commit
+    # If approval decision exists, route appropriately
     if state.get("approval_decision"):
         decision = state.get("approval_decision")
-        if decision == "reject":
-            return "handle_reject"
-        elif decision == "approve":
-            return "commit"
+        # Check if this is for improvements or regular diff
+        if state.get("proposed_changes"):
+            # Improvement approval
+            if decision == "reject":
+                return "reject_improvements"
+            elif decision == "approve":
+                return "apply_improvements"
+        else:
+            # Regular diff approval
+            if decision == "reject":
+                return "handle_reject"
+            elif decision == "approve":
+                return "commit"
     
     # If there's an error, end
     if state.get("error"):
@@ -82,6 +96,21 @@ def detect_intent(state: AgentState) -> Dict[str, Any]:
         intent = "status"
     elif user_input.startswith("/cancel"):
         intent = "cancel"
+    elif user_input.startswith("/improve") or "improve" in user_input or "make it better" in user_input or "fix" in user_input or "add" in user_input:
+        # Check if it's a conversational improvement request
+        # Look for improvement-related keywords
+        improvement_keywords = [
+            "improve", "fix", "add", "enhance", "optimize", "refactor",
+            "better", "update", "modify", "change", "implement"
+        ]
+        if any(keyword in user_input for keyword in improvement_keywords):
+            # Check if it's NOT a command (doesn't start with /)
+            if not user_input.startswith("/"):
+                intent = "improve"
+            else:
+                intent = "ingest"  # Default for unrecognized commands
+        else:
+            intent = "ingest"
     else:
         # Default to ingest for now
         intent = "ingest"
@@ -104,10 +133,19 @@ Commands:
 /cancel - Cancel current operation
 /help - Show this help
 
+💡 **Improvement Requests:**
+You can also message me naturally to request improvements:
+• "Improve the source gatherer to handle rate limits better"
+• "Add retry logic to API calls"
+• "Fix the domain scout to filter out more false positives"
+• "Add better error handling to the parallel agents"
+
+I'll analyze your request, propose changes, and ask for approval before making them.
+
 Examples:
 /ingest topic=photosynthesis
 /gather sources for Algebra
-/gather sources for Machine Learning
+Improve error handling in the source discovery module
 """
     return {"final_response": help_text}
 
@@ -186,6 +224,11 @@ def build_graph():
     # Add parallel agents node
     workflow.add_node("parallel_test", parallel_agents_node)
     
+    # Add improvement agent nodes
+    workflow.add_node("improve", improvement_agent_node)
+    workflow.add_node("apply_improvements", apply_improvements)
+    workflow.add_node("reject_improvements", reject_improvements)
+    
     # Add conditional edges from detect_intent
     def route_after_intent(state: AgentState) -> str:
         intent = state.get("intent")
@@ -195,6 +238,8 @@ def build_graph():
             return "status"
         elif intent == "cancel":
             return "cancel"
+        elif intent == "improve":
+            return "improve"
         elif intent == "gather_sources":
             return "gather_sources"
         elif intent == "fetch_content":
@@ -220,10 +265,25 @@ def build_graph():
     # From write, check if approval needed
     workflow.add_conditional_edges("write", route_intent)
     
+    # Improvement agent approval flow
+    def route_improvement(state: AgentState) -> str:
+        if state.get("approval_required") and not state.get("approval_decision"):
+            return "wait_for_approval"
+        elif state.get("approval_decision") == "approve":
+            return "apply_improvements"
+        elif state.get("approval_decision") == "reject":
+            return "reject_improvements"
+        else:
+            return END
+    
+    workflow.add_conditional_edges("improve", route_improvement)
+    
     # Approval flow
     workflow.add_conditional_edges("wait_for_approval", route_intent)
     workflow.add_edge("commit", END)
     workflow.add_edge("handle_reject", END)
+    workflow.add_edge("apply_improvements", END)
+    workflow.add_edge("reject_improvements", END)
     
     # Terminal nodes
     workflow.add_edge("help", END)

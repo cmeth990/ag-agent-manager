@@ -96,10 +96,10 @@ async def telegram_webhook(request: Request):
                     logger.error(f"Failed to send error message: {send_err}")
                 return JSONResponse({"ok": True})
             
-            # Check if approval is required
-            if result.get("approval_required") and result.get("diff_id"):
+            # Check if approval is required (for both diff and improvements)
+            if result.get("approval_required") and (result.get("diff_id") or result.get("proposed_changes")):
                 # Send approval message with buttons
-                diff_id = result["diff_id"]
+                diff_id = result.get("diff_id") or f"improve_{hash(result.get('user_input', '')) % 10000}"
                 response_text = result.get("final_response", "Please approve or reject the proposed changes.")
                 
                 keyboard = build_approval_keyboard(diff_id)
@@ -180,6 +180,10 @@ async def telegram_webhook(request: Request):
             if current_state:
                 if "proposed_diff" in current_state:
                     state_update["proposed_diff"] = current_state["proposed_diff"]
+                if "proposed_changes" in current_state:
+                    state_update["proposed_changes"] = current_state["proposed_changes"]
+                if "improvement_plan" in current_state:
+                    state_update["improvement_plan"] = current_state["improvement_plan"]
                 if "diff_id" in current_state:
                     state_update["diff_id"] = current_state.get("diff_id") or diff_id
                 if "user_input" in current_state:
