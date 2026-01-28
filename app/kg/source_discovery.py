@@ -67,26 +67,32 @@ async def discover_sources_for_domain(
     if min_quality is None:
         min_quality = thresholds.get("min_source_quality", 0.55)
     
-    # Generate search queries for domain
-    search_queries = generate_search_queries(domain_name, domain_info)
+    # Generate search queries for domain (now async with LLM enhancement)
+    search_queries = await generate_search_queries(domain_name, domain_info)
     
-    # Discover sources from all providers
+    # Discover sources from all providers in parallel for better performance
     all_sources = []
     
-    # Academic sources
+    # Run discovery tasks in parallel
+    discovery_tasks = []
+    
     if not source_types or "academic" in source_types:
-        academic_sources = await discover_academic_sources(search_queries, domain_name)
-        all_sources.extend(academic_sources)
+        discovery_tasks.append(discover_academic_sources(search_queries, domain_name))
     
-    # Educational sources
     if not source_types or "educational" in source_types:
-        educational_sources = await discover_educational_sources(search_queries, domain_name)
-        all_sources.extend(educational_sources)
+        discovery_tasks.append(discover_educational_sources(search_queries, domain_name))
     
-    # General sources
     if not source_types or "general" in source_types:
-        general_sources = await discover_general_sources(search_queries, domain_name)
-        all_sources.extend(general_sources)
+        discovery_tasks.append(discover_general_sources(search_queries, domain_name))
+    
+    # Execute all discovery tasks in parallel
+    if discovery_tasks:
+        results = await asyncio.gather(*discovery_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Source discovery task failed: {result}")
+            else:
+                all_sources.extend(result)
     
     # Evaluate and rank sources
     evaluated_sources = []
@@ -116,8 +122,30 @@ async def discover_sources_for_domain(
     from app.kg.source_fetcher import rank_sources_by_priority
     ranked_sources = rank_sources_by_priority(evaluated_sources, domain_name)
     
-    # Take top sources
-    top_sources = ranked_sources[:max_sources]
+    # Enforce source diversity - ensure we have variety across source types
+    top_sources = []
+    source_type_counts = {}
+    max_per_type = max(1, max_sources // 3)  # Distribute across types
+    
+    for source in ranked_sources:
+        source_type = source.get("properties", {}).get("type", "unknown")
+        current_count = source_type_counts.get(source_type, 0)
+        
+        # Add source if we haven't exceeded max per type or haven't reached total limit
+        if current_count < max_per_type or len(top_sources) < max_sources:
+            top_sources.append(source)
+            source_type_counts[source_type] = current_count + 1
+            
+            if len(top_sources) >= max_sources:
+                break
+    
+    # If we haven't filled the quota, add remaining high-priority sources regardless of type
+    if len(top_sources) < max_sources:
+        for source in ranked_sources:
+            if source not in top_sources:
+                top_sources.append(source)
+                if len(top_sources) >= max_sources:
+                    break
     
     # Calculate statistics
     free_sources = [s for s in top_sources if s.get("cost_score", 1.0) == 0.0]
@@ -161,21 +189,21 @@ async def discover_sources_for_domain(
     }
 
 
-def generate_search_queries(domain_name: str, domain_info: Dict[str, Any]) -> List[str]:
+async def generate_search_queries(domain_name: str, domain_info: Dict[str, Any]) -> List[str]:
     """
-    Generate search queries for a domain.
+    Generate intelligent search queries for a domain using LLM when available.
     
     Returns:
-        List of search query strings
+        List of search query strings optimized for source discovery
     """
     queries = [domain_name]
     
-    # Add variations
+    # Basic variations (always include)
     if " " in domain_name:
-        # Split multi-word domains
         words = domain_name.split()
         queries.append(" ".join(words[:2]))  # First two words
-        queries.append(words[0])  # First word only
+        if len(words) > 1:
+            queries.append(words[0])  # First word only
     
     # Add category-based queries
     category = domain_info.get("category_key")
@@ -188,6 +216,62 @@ def generate_search_queries(domain_name: str, domain_info: Dict[str, Any]) -> Li
     if gradebands:
         queries.append(f"{domain_name} {gradebands[0]}")
     
+    # Use LLM to generate additional optimized queries for better results
+    try:
+        from app.llm.client import get_llm
+        llm = get_llm()
+        
+        prompt = f"""Generate 3-5 optimized search queries for finding educational sources about "{domain_name}".
+
+Context:
+- Domain: {domain_name}
+- Category: {category or 'unknown'}
+- Difficulty: {difficulty or 'intermediate'}
+- Grade Level: {', '.join(gradebands) if gradebands else 'general'}
+
+Generate search queries that would find:
+1. Academic papers and research
+2. Educational textbooks and courses
+3. Online learning resources
+
+Make queries:
+- Specific enough to find relevant sources
+- Varied to cover different aspects of the domain
+- Include synonyms and related terms when helpful
+
+Respond with a JSON array of query strings:
+["query1", "query2", "query3"]
+"""
+        
+        # Add timeout to prevent hanging
+        response = await asyncio.wait_for(
+            llm.ainvoke(prompt),
+            timeout=10.0  # 10 second timeout for query generation
+        )
+        
+        if hasattr(response, 'content'):
+            content = response.content
+        else:
+            content = str(response)
+        
+        # Parse JSON response
+        import re
+        import json
+        json_match = re.search(r'\[.*?\]', content, re.DOTALL)
+        if json_match:
+            llm_queries = json.loads(json_match.group())
+            # Add LLM queries that aren't duplicates
+            for q in llm_queries:
+                q_clean = q.strip()
+                if q_clean and q_clean.lower() not in [q.lower() for q in queries]:
+                    queries.append(q_clean)
+        
+        logger.info(f"Generated {len(queries)} search queries for {domain_name} (including LLM-enhanced)")
+    except asyncio.TimeoutError:
+        logger.warning(f"LLM query generation timed out for {domain_name}, using basic queries only")
+    except Exception as e:
+        logger.warning(f"LLM query generation failed for {domain_name}: {e}, using basic queries only")
+    
     return list(set(queries))  # Remove duplicates
 
 
@@ -199,45 +283,41 @@ async def discover_academic_sources(queries: List[str], domain_name: str) -> Lis
     - Semantic Scholar API
     - arXiv API
     - OpenAlex API
+    
+    Now runs API calls in parallel for better performance.
     """
     sources = []
     
     from app.kg.api_clients import search_semantic_scholar, search_arxiv, search_openalex
     
-    # Limit queries to avoid rate limits
-    for query in queries[:2]:
-        # Search Semantic Scholar
-        if SOURCE_PROVIDERS["academic"]["semantic_scholar"]["enabled"]:
-            try:
-                s2_sources = await search_semantic_scholar(query, limit=5)
-                for source in s2_sources:
-                    source["properties"]["domain"] = domain_name
-                sources.extend(s2_sources)
-                await asyncio.sleep(0.5)  # Rate limiting
-            except Exception as e:
-                logger.warning(f"Semantic Scholar search failed: {e}")
+    # Use best query (first one, usually the domain name)
+    query = queries[0] if queries else domain_name
+    
+    # Run all academic API searches in parallel
+    search_tasks = []
+    
+    if SOURCE_PROVIDERS["academic"]["semantic_scholar"]["enabled"]:
+        search_tasks.append(search_semantic_scholar(query, limit=5))
+    
+    if SOURCE_PROVIDERS["academic"]["arxiv"]["enabled"]:
+        search_tasks.append(search_arxiv(query, limit=5))
+    
+    if SOURCE_PROVIDERS["academic"]["openalex"]["enabled"]:
+        search_tasks.append(search_openalex(query, limit=5))
+    
+    # Execute searches in parallel
+    if search_tasks:
+        results = await asyncio.gather(*search_tasks, return_exceptions=True)
         
-        # Search arXiv
-        if SOURCE_PROVIDERS["academic"]["arxiv"]["enabled"]:
-            try:
-                arxiv_sources = await search_arxiv(query, limit=5)
-                for source in arxiv_sources:
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                provider_names = ["Semantic Scholar", "arXiv", "OpenAlex"]
+                provider_name = provider_names[i] if i < len(provider_names) else "Unknown"
+                logger.warning(f"{provider_name} search failed: {result}")
+            else:
+                for source in result:
                     source["properties"]["domain"] = domain_name
-                sources.extend(arxiv_sources)
-                await asyncio.sleep(1.0)  # Rate limiting (1 req per 3 sec)
-            except Exception as e:
-                logger.warning(f"arXiv search failed: {e}")
-        
-        # Search OpenAlex
-        if SOURCE_PROVIDERS["academic"]["openalex"]["enabled"]:
-            try:
-                oa_sources = await search_openalex(query, limit=5)
-                for source in oa_sources:
-                    source["properties"]["domain"] = domain_name
-                sources.extend(oa_sources)
-                await asyncio.sleep(0.2)  # Rate limiting
-            except Exception as e:
-                logger.warning(f"OpenAlex search failed: {e}")
+                sources.extend(result)
     
     logger.info(f"Discovered {len(sources)} academic sources for {domain_name}")
     return sources
@@ -251,41 +331,41 @@ async def discover_educational_sources(queries: List[str], domain_name: str) -> 
     - OpenStax (web search)
     - Khan Academy (URL construction)
     - MIT OCW (URL construction)
+    
+    Now runs API calls in parallel for better performance.
     """
     sources = []
     
     from app.kg.api_clients import search_openstax, search_khan_academy, search_mit_ocw
     
-    for query in queries[:2]:  # Limit queries
-        # Search OpenStax
-        if SOURCE_PROVIDERS["educational"]["openstax"]["enabled"]:
-            try:
-                openstax_sources = await search_openstax(query, limit=3)
-                for source in openstax_sources:
-                    source["properties"]["domain"] = domain_name
-                sources.extend(openstax_sources)
-            except Exception as e:
-                logger.warning(f"OpenStax search failed: {e}")
+    # Use best query (first one, usually the domain name)
+    query = queries[0] if queries else domain_name
+    
+    # Run all educational API searches in parallel
+    search_tasks = []
+    
+    if SOURCE_PROVIDERS["educational"]["openstax"]["enabled"]:
+        search_tasks.append(search_openstax(query, limit=3))
+    
+    if SOURCE_PROVIDERS["educational"]["khan_academy"]["enabled"]:
+        search_tasks.append(search_khan_academy(query, limit=3))
+    
+    if SOURCE_PROVIDERS["educational"]["mit_ocw"]["enabled"]:
+        search_tasks.append(search_mit_ocw(query, limit=3))
+    
+    # Execute searches in parallel
+    if search_tasks:
+        results = await asyncio.gather(*search_tasks, return_exceptions=True)
         
-        # Search Khan Academy
-        if SOURCE_PROVIDERS["educational"]["khan_academy"]["enabled"]:
-            try:
-                khan_sources = await search_khan_academy(query, limit=3)
-                for source in khan_sources:
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                provider_names = ["OpenStax", "Khan Academy", "MIT OCW"]
+                provider_name = provider_names[i] if i < len(provider_names) else "Unknown"
+                logger.warning(f"{provider_name} search failed: {result}")
+            else:
+                for source in result:
                     source["properties"]["domain"] = domain_name
-                sources.extend(khan_sources)
-            except Exception as e:
-                logger.warning(f"Khan Academy search failed: {e}")
-        
-        # Search MIT OCW
-        if SOURCE_PROVIDERS["educational"]["mit_ocw"]["enabled"]:
-            try:
-                mit_sources = await search_mit_ocw(query, limit=3)
-                for source in mit_sources:
-                    source["properties"]["domain"] = domain_name
-                sources.extend(mit_sources)
-            except Exception as e:
-                logger.warning(f"MIT OCW search failed: {e}")
+                sources.extend(result)
     
     logger.info(f"Discovered {len(sources)} educational sources for {domain_name}")
     return sources
