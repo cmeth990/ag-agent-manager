@@ -176,7 +176,11 @@ async def source_gatherer_node(state: AgentState) -> Dict[str, Any]:
         if domain_info.get("difficulty"):
             response_parts.append(f"   Difficulty: {domain_info.get('difficulty')}")
         
+        total_d = stats.get("total_discovered", 0)
+        meets = stats.get("meets_quality_threshold", len(sources))
         response_parts.append(f"\n   Found {len(sources)} high-quality sources (quality ≥ {result['quality_threshold']:.2f})")
+        if total_d > 0 and (total_d != meets or (total_d > 0 and len(sources) == 0)):
+            response_parts.append(f"   (Discovered: {total_d} | Met threshold: {meets})")
         response_parts.append(f"   Average Quality: {stats['average_quality']:.3f}")
         response_parts.append(f"   Average Priority: {stats.get('average_priority', 0):.3f}")
         response_parts.append(f"   Free Sources: {stats.get('free_sources', 0)} | Paid: {stats.get('paid_sources', 0)}")

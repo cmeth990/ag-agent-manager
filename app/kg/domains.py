@@ -498,6 +498,7 @@ def create_all_domains(category_hypernode_ids: Optional[Dict[str, str]] = None) 
 def get_domain_by_name(domain_name: str) -> Optional[Dict[str, Any]]:
     """
     Get domain information by name.
+    Exact match first; then fuzzy match (e.g. "Algebra" -> "Algebra I").
     
     Args:
         domain_name: Name of the domain
@@ -505,6 +506,7 @@ def get_domain_by_name(domain_name: str) -> Optional[Dict[str, Any]]:
     Returns:
         Dict with domain info or None
     """
+    name_lower = domain_name.strip().lower()
     for category_key, domains in DOMAIN_TAXONOMY.items():
         if domain_name in domains:
             domain_config = domains[domain_name]
@@ -516,7 +518,31 @@ def get_domain_by_name(domain_name: str) -> Optional[Dict[str, Any]]:
                 "upper_ontology": get_upper_ontology_by_category(category_key),
                 "orp_role": get_orp_role_by_category(category_key)
             }
-    return None
+    # Fuzzy: prefer domain that starts with query (e.g. "Algebra" -> "Algebra I" not "Pre-Algebra")
+    candidates = []
+    for category_key, domains in DOMAIN_TAXONOMY.items():
+        for dname, domain_config in domains.items():
+            d_lower = dname.lower()
+            if name_lower in d_lower or d_lower in name_lower:
+                candidates.append((dname, category_key, domain_config))
+    if not candidates:
+        return None
+    # Prefer exact start match ("algebra i" starts with "algebra"), then shortest
+    def rank(c):
+        dname, _, _ = c
+        d_lower = dname.lower()
+        starts = 1 if d_lower.startswith(name_lower) or name_lower.startswith(d_lower.split()[0] if d_lower.split() else "") else 0
+        return (-starts, len(dname))
+    candidates.sort(key=rank)
+    dname, category_key, domain_config = candidates[0]
+    return {
+        "domain_name": dname,
+        "category_key": category_key,
+        "gradebands": domain_config.get("gradebands", []),
+        "difficulty": domain_config.get("difficulty", "intermediate"),
+        "upper_ontology": get_upper_ontology_by_category(category_key),
+        "orp_role": get_orp_role_by_category(category_key)
+    }
 
 
 def get_domains_by_category(category_key: str) -> List[str]:

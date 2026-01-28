@@ -293,8 +293,12 @@ def calculate_recency_score(source: Dict[str, Any], domain_name: Optional[str]) 
     props = source.get("properties", {})
     year = props.get("year")
     
-    if not year:
+    if year is None:
         return 0.5  # Neutral if unknown
+    try:
+        year = int(year)
+    except (TypeError, ValueError):
+        return 0.5
     
     current_year = datetime.now().year
     age = current_year - year

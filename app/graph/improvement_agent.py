@@ -32,15 +32,23 @@ async def improvement_agent_node(state: AgentState) -> Dict[str, Any]:
     """
     user_input = state.get("user_input", "")
     chat_id = state.get("chat_id")
+    working_notes = state.get("working_notes") or {}
+    prior_context = working_notes.get("improvement_context") or working_notes.get("prior_improvement") or ""
     
     logger.info(f"Improvement agent processing request: {user_input[:100]}...")
     
     llm = get_llm_for_agent(state, agent_name="improvement_agent")
-    
-    # Step 1: Understand the request and plan changes
+    if not llm:
+        return {
+            "error": "No LLM configured",
+            "final_response": "❌ Improvement agent needs an LLM (set OPENAI_API_KEY or ANTHROPIC_API_KEY in Railway Variables)."
+        }
+
+    # Step 1: Understand the request and plan changes (include prior conversation if any)
     analysis_prompt = f"""You are a code improvement agent. Analyze this user request and create a plan:
 
 User Request: {user_input}
+{f'Prior context from this conversation: {prior_context}' if prior_context else ''}
 
 Your task:
 1. Understand what improvement is being requested

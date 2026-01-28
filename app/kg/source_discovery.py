@@ -119,6 +119,17 @@ async def discover_sources_for_domain(
         if quality_score >= min_quality:
             evaluated_sources.append(source)
     
+    # If no sources met threshold but we discovered some, include best available (quality >= 0.5)
+    used_fallback = False
+    fallback_threshold = max(0.5, (min_quality - 0.15)) if min_quality else 0.5
+    if not evaluated_sources and all_sources:
+        for source in all_sources:
+            if source.get("quality_score", 0) >= fallback_threshold:
+                evaluated_sources.append(source)
+        if evaluated_sources:
+            used_fallback = True
+            logger.info(f"Including {len(evaluated_sources)} sources below threshold (≥{fallback_threshold:.2f}) for {domain_name}")
+
     # Rank by priority (quality and cost)
     from app.kg.source_fetcher import rank_sources_by_priority
     ranked_sources = rank_sources_by_priority(evaluated_sources, domain_name)
@@ -170,6 +181,8 @@ async def discover_sources_for_domain(
     
     # Generate recommendations
     recommendations = []
+    if used_fallback:
+        recommendations.append(f"Showing sources below quality threshold ({min_quality:.2f}) — {len(top_sources)} included (quality ≥ {fallback_threshold:.2f}).")
     if len(top_sources) < thresholds.get("min_sources", 2):
         recommendations.append(f"Only {len(top_sources)} sources found. Need at least {thresholds.get('min_sources', 2)} for {domain_info.get('difficulty', 'intermediate')} level.")
     

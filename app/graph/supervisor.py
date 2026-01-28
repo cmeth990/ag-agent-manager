@@ -99,19 +99,24 @@ def detect_intent(state: AgentState) -> Dict[str, Any]:
         intent = "cancel"
     elif user_input.startswith("/push") or "push to github" in user_input or "push changes" in user_input:
         intent = "push_changes"
-    elif user_input.startswith("/improve") or "improve" in user_input or "make it better" in user_input or "fix" in user_input or "add" in user_input:
-        # Check if it's a conversational improvement request
-        # Look for improvement-related keywords
+    elif user_input.startswith("/improve") or (
+        ("improve" in user_input or "make it better" in user_input or "fix the" in user_input or "enhance" in user_input or
+         "optimize" in user_input or "refactor" in user_input or "update the" in user_input or "modify the" in user_input)
+        and ("agent" in user_input or "code" in user_input or "source gatherer" in user_input or "fetcher" in user_input or
+             "scout" in user_input or "extractor" in user_input or "bot" in user_input or "system" in user_input or
+             "conversation" in user_input or "we're having" in user_input or "this chat" in user_input)
+    ):
+        intent = "improve"
+    elif "expand the knowledge graph" in user_input or "expand the kg" in user_input or "add knowledge about" in user_input or "add knowledge on" in user_input:
+        intent = "ingest"  # Will parse topic from message in extractor
+    elif "improve" in user_input or "fix" in user_input or "add " in user_input:
+        # Broad improvement keywords without clear code context -> improve (user can clarify)
         improvement_keywords = [
-            "improve", "fix", "add", "enhance", "optimize", "refactor",
+            "improve", "fix", "enhance", "optimize", "refactor",
             "better", "update", "modify", "change", "implement"
         ]
-        if any(keyword in user_input for keyword in improvement_keywords):
-            # Check if it's NOT a command (doesn't start with /)
-            if not user_input.startswith("/"):
-                intent = "improve"
-            else:
-                intent = "ingest"  # Default for unrecognized commands
+        if any(k in user_input for k in improvement_keywords):
+            intent = "improve"
         else:
             intent = "ingest"
     else:
@@ -136,14 +141,15 @@ Commands:
 /cancel - Cancel current operation
 /help - Show this help
 
-💡 **Improvement Requests:**
-You can also message me naturally to request improvements:
-• "Improve the source gatherer to handle rate limits better"
-• "Add retry logic to API calls"
-• "Fix the domain scout to filter out more false positives"
-• "Add better error handling to the parallel agents"
+💡 **Improvement & expand KG (conversation-style):**
+• Improve agents: "/improve ..." or "Improve the source gatherer to ..." — I propose code changes; you Approve/Reject.
+• Expand the KG: "/ingest topic=X" or "Expand the knowledge graph" / "Add knowledge about photosynthesis" — I extract, link, write; you Approve/Reject to commit.
+• You can alternate: improve the agents, then expand the KG, then improve again. Multi-turn state is kept per chat.
 
-I'll analyze your request, propose changes, ask for approval, and automatically push to GitHub when approved.
+You can also say:
+• "Improve the source gatherer to handle rate limits better"
+• "Fix the domain scout to filter out more false positives"
+• "Add knowledge about algebra" (routes to ingest)
 
 /push - Push committed changes to GitHub
 
