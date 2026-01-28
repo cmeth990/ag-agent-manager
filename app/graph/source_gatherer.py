@@ -21,16 +21,19 @@ logger = logging.getLogger(__name__)
 SOURCE_GATHERING_PROMPT = """You are a source discovery expert helping to find high-quality sources for educational domains.
 
 Your task is to:
-1. Identify the domain(s) the user wants sources for
+1. Identify the domain(s) the user wants sources for (even if not in the available list - extract the domain name from the request)
 2. Generate effective search queries for that domain
 3. Suggest source types that would be most valuable (academic papers, textbooks, courses, etc.)
 
 User request: {user_input}
 
-Available domains: {available_domains}
+Available domains (for reference): {available_domains}
+
+IMPORTANT: Extract the domain name from the user request even if it's not in the available domains list.
+For example, if the user says "gather sources for American Revolution", extract "American Revolution" as the domain.
 
 For the identified domain(s), provide:
-1. Domain name(s)
+1. Domain name(s) - extract from the request, use exact name mentioned
 2. Search queries (3-5 queries that would find good sources)
 3. Recommended source types (academic, educational, general)
 4. Any specific requirements (grade level, difficulty, recency)
@@ -219,8 +222,32 @@ async def source_gatherer_node(state: AgentState) -> Dict[str, Any]:
 
 def extract_domains_from_text(text: str, available_domains: List[str]) -> List[str]:
     """
-    Extract domain names from text using simple matching.
+    Extract domain names from text using pattern extraction or matching.
     """
+    import re
+    
+    # First, try to extract domain from common patterns like "for X" or "gather sources for X"
+    # Improved patterns to capture multi-word domains like "American Revolution"
+    patterns = [
+        r'(?:gather|find|get|search for|discover|fetch).*?for\s+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|\.|and)',
+        r'for\s+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|\.|and)',
+        r'domain[s]?[:\s]+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|\.)',
+    ]
+    
+    extracted = []
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        for match in matches:
+            domain = match.strip()
+            # Clean up common trailing words
+            domain = re.sub(r'\s+(sources?|content|materials?)$', '', domain, flags=re.IGNORECASE)
+            if domain and len(domain) > 2 and len(domain) < 100:
+                extracted.append(domain)
+    
+    if extracted:
+        return extracted[:1]  # Return first extracted domain
+    
+    # Fallback: try matching against available domains
     text_lower = text.lower()
     found_domains = []
     
@@ -230,9 +257,7 @@ def extract_domains_from_text(text: str, available_domains: List[str]) -> List[s
         if domain_lower in text_lower or any(word in text_lower for word in domain_lower.split() if len(word) > 3):
             found_domains.append(domain)
     
-    # Also check for common patterns
-    import re
-    # Pattern: "for [Domain]" or "sources for [Domain]"
+    # Also check for common patterns with title case
     pattern = r'(?:for|about|on)\s+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|and)'
     matches = re.findall(pattern, text)
     for match in matches:
@@ -244,7 +269,7 @@ def extract_domains_from_text(text: str, available_domains: List[str]) -> List[s
                     if domain not in found_domains:
                         found_domains.append(domain)
     
-    return found_domains[:5]  # Limit to 5 domains
+    return found_domains[:5] if found_domains else extracted[:1]  # Return extracted if no matches found
 
 
 async def gather_sources_for_all_domains_in_category(

@@ -352,9 +352,15 @@ def is_likely_domain_name(text: str, existing_domains: Set[str]) -> bool:
         "help", "faq", "faqs", "for individuals", "for businesses", "for universities",
         "for governments", "join for free", "log in", "sign in", "register",
         "terms", "privacy", "cookie", "accessibility", "sitemap", "careers",
-        "blog", "news", "events", "support", "documentation", "api"
+        "blog", "news", "events", "support", "documentation", "api",
+        "about ocw", "contact us", "about us", "get started", "sign in", "log in"
     ]
-    if text.lower().strip() in generic_terms:
+    text_lower_clean = text.lower().strip()
+    if text_lower_clean in generic_terms:
+        return False
+    
+    # Skip if starts with generic navigation words
+    if text_lower_clean.startswith(("about ", "contact ", "help ", "faq", "login", "sign in", "log in", "register", "get started")):
         return False
     
     # Skip navigation/UI elements
