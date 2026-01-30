@@ -104,6 +104,11 @@ def detect_intent(state: AgentState) -> Dict[str, Any]:
         intent = "push_changes"
     elif user_input.startswith("/graph") or "graph progress" in user_input or "knowledge graph progress" in user_input or "show graph" in user_input:
         intent = "graph_progress"
+    elif any(phrase in user_input for phrase in (
+        "live call", "start call", "talk live", "join call", "voice call", "start a call", "get a call",
+        "call me", "call you", "real-time call", "realtime call"
+    )) or user_input.strip().lower() in ("call", "live call", "start call", "talk live"):
+        intent = "live_call"
     elif user_input.startswith("/expand") or "build the kg" in user_input or "build the knowledge graph" in user_input or "autonomous expand" in user_input or (user_input.strip() == "continue" or (user_input.strip().startswith("continue") and len(user_input.split()) <= 2)):
         intent = "autonomous_expand"
     elif any(phrase in user_input for phrase in (
@@ -160,6 +165,7 @@ Commands:
 /status - Check bot status
 /cancel - Cancel current operation
 /graph - Private link to KG progress (zoom by level)
+**Live call** — Say *live call* or *start call* to get a link to join a real-time voice call (set LIVE_CALL_URL)
 /help - Show this help
 
 💡 **Improvement & expand:** "/improve ..." or "Improve the source gatherer to ..." — I propose code changes; you Approve/Reject. "/ingest topic=X" or "Add knowledge about X" — I extract, link, write; you Approve/Reject to commit.
@@ -209,6 +215,46 @@ async def graph_progress_node(state: AgentState) -> Dict[str, Any]:
     except Exception as e:
         logger.exception("Graph progress failed")
         return {"final_response": f"❌ Failed: {str(e)[:200]}"}
+
+
+def live_call_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Return a link to start a live voice call (e.g. Jitsi, Daily.co).
+    Set LIVE_CALL_URL in env to your call room URL.
+    When PUBLIC_URL and chat_id are set, also include a bridge link (transcribe + bot → Telegram).
+    """
+    import os
+    from urllib.parse import urlparse
+    url = (os.getenv("LIVE_CALL_URL") or "").strip()
+    if url:
+        room = (urlparse(url).path or "").strip("/") or "lumi-superintendent-911"
+        base_url = (os.getenv("PUBLIC_URL") or os.getenv("RAILWAY_URL") or "").rstrip("/")
+        chat_id = state.get("chat_id") or ""
+        bridge_line = ""
+        if base_url and chat_id:
+            bridge_url = f"{base_url}/call/bridge?room={room}&chat_id={chat_id}"
+            bridge_line = (
+                f"\n\n🔗 **Bridge (transcribe + bot → Telegram):**\n{bridge_url}\n\n"
+                "Open that link, allow mic, speak; we transcribe, run the bot, and send replies to this chat."
+            )
+        return {
+            "final_response": (
+                "📞 **Live voice call**\n\n"
+                "Open this link to join a real-time voice conversation:\n\n"
+                f"🔗 {url}\n\n"
+                "Use it when you want a continuous call instead of sending voice messages. "
+                "If the room uses the same bot logic, you can say *begin*, *status*, *approve*, etc. there too."
+                + bridge_line
+            )
+        }
+    return {
+        "final_response": (
+            "📞 **Live call** isn’t configured yet.\n\n"
+            "Set **LIVE_CALL_URL** in your environment (e.g. Railway Variables) to a link where you can join a voice call "
+            "(e.g. a Jitsi meet link, Daily.co room, or your own call page). Then say *live call* or *start call* again to get the link.\n\n"
+            "In the meantime, you can **send voice messages** here — I’ll transcribe and reply (and optionally with voice if TALK_REPLY_VOICE is set)."
+        )
+    }
 
 
 def status_node(state: AgentState) -> Dict[str, Any]:
@@ -305,6 +351,7 @@ def build_graph():
     workflow.add_node("reject_improvements", reject_improvements)
     workflow.add_node("push_changes", push_changes_node)
     workflow.add_node("graph_progress", graph_progress_node)
+    workflow.add_node("live_call", live_call_node)
     workflow.add_node("expansion", expansion_node)
     workflow.add_node("begin", begin_node)
 
@@ -326,6 +373,8 @@ def build_graph():
             return "push_changes"
         elif intent == "graph_progress":
             return "graph_progress"
+        elif intent == "live_call":
+            return "live_call"
         elif intent == "autonomous_expand":
             return "expansion"
         elif intent == "autonomous_begin":
@@ -388,6 +437,7 @@ def build_graph():
     # Terminal nodes
     workflow.add_edge("help", END)
     workflow.add_edge("status", END)
+    workflow.add_edge("live_call", END)
     workflow.add_edge("cancel", END)
     workflow.add_edge("query", END)
     workflow.add_edge("gather_sources", END)

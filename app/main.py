@@ -8,8 +8,8 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi import Depends, FastAPI, Request, HTTPException, File, UploadFile, Form
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi import Query
 from app.auth import require_admin_key
 import uvicorn
@@ -83,6 +83,90 @@ async def root():
 async def health():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+# ----- Call bridge: transcribe voice from bridge page, run graph, sync to Telegram -----
+_CALL_BRIDGE_HTML_PATH = Path(__file__).resolve().parent / "static" / "call_bridge.html"
+
+
+@app.get("/call/bridge", response_class=HTMLResponse)
+async def call_bridge(
+    room: str = Query(default="lumi-superintendent-911", description="Jitsi room name"),
+    chat_id: str = Query(default="", description="Telegram chat_id for syncing replies"),
+):
+    """
+    Serve the call bridge page. User opens mic, speaks; we transcribe, run the bot, send reply to Telegram.
+    Open with ?room=...&chat_id=... (chat_id from the link the bot sends when you say 'live call').
+    """
+    if not _CALL_BRIDGE_HTML_PATH.exists():
+        raise HTTPException(status_code=404, detail="Bridge page not found")
+    html = _CALL_BRIDGE_HTML_PATH.read_text(encoding="utf-8")
+    return HTMLResponse(html)
+
+
+@app.post("/call/audio")
+async def call_audio(
+    audio: UploadFile = File(...),
+    chat_id: str = Form(...),
+):
+    """
+    Receive audio from the bridge page: transcribe (Whisper), run graph (same as Telegram), send reply to Telegram.
+    Returns { transcript, reply }.
+    """
+    if not chat_id or not chat_id.strip():
+        raise HTTPException(status_code=400, detail="chat_id required")
+    try:
+        body = await audio.read()
+    except Exception as e:
+        logger.warning("Call bridge: failed to read audio: %s", e)
+        raise HTTPException(status_code=400, detail="Failed to read audio")
+    if len(body) < 100:
+        raise HTTPException(status_code=400, detail="Audio too short")
+    from app.voice import transcribe_audio
+    transcript = await transcribe_audio(body, filename_hint=audio.filename or "audio.webm")
+    if not transcript or not transcript.strip():
+        return JSONResponse(
+            status_code=200,
+            content={"transcript": "", "reply": "Couldn't transcribe that. Try again or say something clearer."},
+        )
+    thread_id = chat_id.strip()
+    initial_state: AgentState = {
+        "user_input": transcript.strip(),
+        "chat_id": thread_id,
+        "intent": None,
+        "task_queue": [],
+        "working_notes": {},
+        "proposed_diff": None,
+        "diff_id": None,
+        "approval_required": False,
+        "approval_decision": None,
+        "final_response": None,
+        "error": None,
+    }
+    try:
+        result = await run_graph(initial_state, thread_id, config={"recursion_limit": 30})
+    except Exception as e:
+        logger.exception("Call bridge: graph run failed")
+        return JSONResponse(
+            status_code=200,
+            content={"transcript": transcript, "reply": f"Error: {str(e)[:200]}"},
+        )
+    reply = result.get("final_response") or result.get("error") or "Done."
+    try:
+        await send_message(int(chat_id), f"📞 **Call:** {transcript}\n\n{reply}", parse_mode="Markdown")
+    except Exception as e:
+        logger.warning("Call bridge: failed to send to Telegram: %s", e)
+    return JSONResponse(content={"transcript": transcript, "reply": reply})
+
+
+@app.get("/call/tts")
+async def call_tts(text: str = Query(..., min_length=1, max_length=2000)):
+    """Return TTS audio (OGG) for the given text. Used by the bridge page to play bot replies."""
+    from app.voice import text_to_speech
+    audio_bytes = await text_to_speech(text[:2000])
+    if not audio_bytes:
+        raise HTTPException(status_code=503, detail="TTS not available")
+    return Response(content=audio_bytes, media_type="audio/ogg")
 
 
 @app.get("/telemetry/tasks", dependencies=[Depends(require_admin_key)])
@@ -301,12 +385,97 @@ async def telegram_webhook(request: Request):
             message = update["message"]
             chat_id = message["chat"]["id"]
             text = message.get("text", "").strip()
-            
+
+            # Talk: voice or video note → download, transcribe, use as text
+            if not text and (message.get("voice") or message.get("video_note")):
+                voice_or_note = message.get("voice") or message.get("video_note")
+                file_id = voice_or_note.get("file_id")
+                if file_id:
+                    try:
+                        from app.telegram import get_file, download_telegram_file
+                        from app.voice import transcribe_audio
+                        file_info = await get_file(file_id)
+                        file_path = file_info.get("file_path")
+                        if file_path:
+                            audio_bytes = await download_telegram_file(file_path)
+                            ext = "ogg" if "ogg" in (file_path or "").lower() else "m4a"
+                            transcribed = await transcribe_audio(audio_bytes, filename_hint=f"voice.{ext}")
+                            if transcribed:
+                                text = transcribed.strip()
+                                logger.info(f"Voice from {chat_id} transcribed: {text[:80]}")
+                            else:
+                                try:
+                                    await send_message(chat_id, "Couldn't transcribe that. Try again or type your message.")
+                                except Exception:
+                                    pass
+                                return JSONResponse({"ok": True})
+                        else:
+                            try:
+                                await send_message(chat_id, "Couldn't get voice file. Try again.")
+                            except Exception:
+                                pass
+                            return JSONResponse({"ok": True})
+                    except Exception as e:
+                        logger.warning("Voice handling failed: %s", e)
+                        try:
+                            await send_message(chat_id, "Voice message failed. Try typing instead.")
+                        except Exception:
+                            pass
+                        return JSONResponse({"ok": True})
+
             if not text:
                 return JSONResponse({"ok": True})
-            
+
             logger.info(f"Message from {chat_id}: {text[:100]}")
-            
+            thread_id = str(chat_id)
+
+            # Live conversation: if we're waiting for approval, "approve"/"reject" (voice or text) counts as the decision
+            text_lower = text.strip().lower()
+            if text_lower in ("approve", "reject", "yes", "no"):
+                action = "approve" if text_lower in ("approve", "yes") else "reject"
+                try:
+                    from app.graph.supervisor import get_graph
+                    graph = get_graph()
+                    run_config = {"configurable": {"thread_id": thread_id}}
+                    checkpoint_state = await graph.aget_state(run_config)
+                    current_state = checkpoint_state.values if checkpoint_state else {}
+                except Exception:
+                    current_state = {}
+                if current_state.get("approval_required") and not current_state.get("approval_decision"):
+                    state_update: AgentState = {
+                        "chat_id": thread_id,
+                        "approval_decision": action,
+                        "task_queue": [],
+                        "working_notes": {},
+                    }
+                    if current_state:
+                        for k in ("proposed_diff", "proposed_changes", "improvement_plan", "diff_id", "user_input", "intent", "crucial_decision_type", "crucial_decision_context"):
+                            if k in current_state:
+                                state_update[k] = current_state[k]
+                    set_task_status(thread_id, TaskStatus.IN_PROGRESS, agent="supervisor")
+                    try:
+                        result = await run_graph(state_update, thread_id, config={"recursion_limit": 30})
+                        set_task_status(thread_id, TaskStatus.COMPLETED, agent="supervisor")
+                    except Exception as e:
+                        set_task_status(thread_id, TaskStatus.FAILED, error=str(e)[:500])
+                        try:
+                            await send_message(chat_id, f"❌ Error: {str(e)[:200]}")
+                        except Exception:
+                            pass
+                        return JSONResponse({"ok": True})
+                    if result.get("final_response"):
+                        try:
+                            await send_message(chat_id, result["final_response"])
+                        except Exception:
+                            pass
+                    elif result.get("error"):
+                        try:
+                            await send_message(chat_id, f"❌ {result['error']}")
+                        except Exception:
+                            pass
+                    return JSONResponse({"ok": True})
+                # else: not waiting for approval, fall through to normal flow
+
             # Create initial state
             initial_state: AgentState = {
                 "user_input": text,
@@ -341,7 +510,6 @@ async def telegram_webhook(request: Request):
                     logger.error(f"Enqueue failed, falling back to inline: {e}")
             
             # Inline: run graph and send response
-            thread_id = str(chat_id)
             set_task_status(thread_id, TaskStatus.IN_PROGRESS, agent="supervisor")
             try:
                 result = await run_graph(
@@ -370,20 +538,45 @@ async def telegram_webhook(request: Request):
                 if crucial_type:
                     label = get_crucial_decision_label(crucial_type)
                     response_text = f"🔑 **Key decision: {label}**\n\n{response_text}"
+                # Hands-free: add "What next?" so user can say approve/reject by voice
+                if os.getenv("TALK_CONVERSATIONAL", "").lower() in ("true", "1", "yes") or os.getenv("TALK_REPLY_VOICE", "").lower() in ("true", "1", "yes"):
+                    response_text += "\n\n**What next?** Say *approve* or *reject* (or *begin*, *status*, *continue*)."
                 keyboard = build_approval_keyboard(diff_id)
                 try:
-                    await send_message(chat_id, response_text, reply_markup=keyboard)
+                    await send_message(chat_id, response_text, reply_markup=keyboard, parse_mode="Markdown")
                 except Exception as e:
                     logger.error(f"Error sending approval message: {e}")
+                # Optional TTS so user hears the ask when they can't look at the screen
+                if os.getenv("TALK_REPLY_VOICE", "").lower() in ("true", "1", "yes"):
+                    try:
+                        from app.voice import text_to_speech
+                        from app.telegram import send_voice
+                        voice_bytes = await text_to_speech(response_text[:4096])
+                        if voice_bytes:
+                            await send_voice(chat_id, voice_bytes, caption=None)
+                    except Exception as tts_err:
+                        logger.warning("TTS reply (approval) failed: %s", tts_err)
                 # Continue mission work in the meantime (expansion/discovery) so we get closer while user decides
                 _trigger_mission_continue(chat_id)
             elif result.get("final_response"):
-                # Send regular response
+                # Send regular response (text, and optionally voice if TALK_REPLY_VOICE)
+                response_text = result["final_response"]
+                if os.getenv("TALK_CONVERSATIONAL", "").lower() in ("true", "1", "yes") or os.getenv("TALK_REPLY_VOICE", "").lower() in ("true", "1", "yes"):
+                    response_text += "\n\n**What next?** Say *begin*, *status*, *continue*, or *approve* / *reject* if I'm waiting on you."
                 try:
-                    await send_message(chat_id, result["final_response"])
+                    await send_message(chat_id, response_text, parse_mode="Markdown")
                     logger.info(f"Sent response to {chat_id}")
                 except Exception as e:
                     logger.error(f"Error sending message to {chat_id}: {e}", exc_info=True)
+                if os.getenv("TALK_REPLY_VOICE", "").lower() in ("true", "1", "yes"):
+                    try:
+                        from app.voice import text_to_speech
+                        from app.telegram import send_voice
+                        voice_bytes = await text_to_speech(response_text[:4096])
+                        if voice_bytes:
+                            await send_voice(chat_id, voice_bytes, caption=None)
+                    except Exception as tts_err:
+                        logger.warning("TTS reply failed: %s", tts_err)
             elif result.get("error"):
                 # Send error message
                 try:

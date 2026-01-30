@@ -200,3 +200,59 @@ async def get_webhook_info() -> Dict[str, Any]:
         response = await client.get(url)
         response.raise_for_status()
         return response.json()
+
+
+async def get_file(file_id: str) -> Dict[str, Any]:
+    """Get file metadata from Telegram (returns file_path for download)."""
+    token = get_bot_token()
+    url = f"{TELEGRAM_API_BASE}{token}/getFile"
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json={"file_id": file_id})
+        response.raise_for_status()
+        return response.json().get("result", {})
+
+
+TELEGRAM_FILE_BASE = "https://api.telegram.org/file/bot"
+
+
+async def download_telegram_file(file_path: str) -> bytes:
+    """Download file from Telegram by file_path (from getFile). Uses file/bot base URL."""
+    token = get_bot_token()
+    url = f"{TELEGRAM_FILE_BASE}{token}/{file_path}"
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.content
+
+
+async def send_voice(
+    chat_id: int,
+    voice: Union[bytes, str],
+    caption: Optional[str] = None,
+    parse_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Send a voice message to a Telegram chat.
+    voice: Audio bytes (OGG/MP3) or file_id.
+    """
+    token = get_bot_token()
+    url = f"{TELEGRAM_API_BASE}{token}/sendVoice"
+    if isinstance(voice, bytes):
+        async with httpx.AsyncClient() as client:
+            payload: Dict[str, Any] = {"chat_id": str(chat_id)}
+            if caption:
+                payload["caption"] = caption[:1024]
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+            files = {"voice": ("voice.ogg", voice, "audio/ogg")}
+            response = await client.post(url, data=payload, files=files)
+    else:
+        payload: Dict[str, Any] = {"chat_id": chat_id, "voice": voice}
+        if caption:
+            payload["caption"] = caption
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload)
+    response.raise_for_status()
+    return response.json()

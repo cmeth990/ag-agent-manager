@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hands-free conversation → Telegram</title>
+  <style>
+    :root { --bg: #0f0f12; --surface: #1a1a1f; --text: #e8e8ec; --accent: #6366f1; --muted: #71717a; --green: #22c55e; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 1rem; min-height: 100vh; }
+    h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
+    a { color: var(--accent); }
+    .card { background: var(--surface); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .link-row { margin: 0.5rem 0; }
+    button { background: var(--accent); color: white; border: none; padding: 0.6rem 1rem; border-radius: 6px; font-size: 1rem; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.pause { background: var(--muted); }
+    .status { font-size: 0.875rem; margin-top: 0.5rem; }
+    .status.listening { color: var(--green); }
+    .status.speaking { color: var(--accent); }
+    .status.bot { color: var(--muted); }
+    #log { white-space: pre-wrap; font-size: 0.875rem; max-height: 180px; overflow-y: auto; margin-top: 0.5rem; }
+    .reply { background: #1e1e24; padding: 0.5rem; border-radius: 4px; margin-top: 0.5rem; }
+    .pill { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 999px; font-size: 0.75rem; margin-right: 0.5rem; }
+    .pill.on { background: var(--green); color: var(--bg); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🎙️ Hands-free conversation</h1>
+    <p>One tap to start. Then just talk — when you pause, the bot replies out loud and in Telegram. No more buttons.</p>
+    <div class="link-row" id="jitsiLinkRow"></div>
+  </div>
+  <div class="card">
+    <span class="pill" id="statePill">Off</span>
+    <button id="startBtn">Start conversation</button>
+    <button id="pauseBtn" class="pause" style="display:none;">Pause</button>
+    <p class="status" id="status">Tap Start, allow mic, then speak. Pause ~1 second when done; the bot will reply and keep listening.</p>
+    <div id="log"></div>
+    <div class="reply" id="reply" style="display:none;"></div>
+  </div>
+
+  <script>
+    (function() {
+      const params = new URLSearchParams(window.location.search);
+      const room = params.get('room') || 'lumi-superintendent-911';
+      const chatId = params.get('chat_id') || '';
+      const jitsiUrl = 'https://meet.jit.si/' + encodeURIComponent(room);
+
+      document.getElementById('jitsiLinkRow').innerHTML = chatId
+        ? '<a href="' + jitsiUrl + '" target="_blank" rel="noopener">Join Jitsi: ' + room + '</a>'
+        : '<strong>Missing chat_id.</strong> Use the link from the bot (live call → bridge).';
+
+      const startBtn = document.getElementById('startBtn');
+      const pauseBtn = document.getElementById('pauseBtn');
+      const statusEl = document.getElementById('status');
+      const statePill = document.getElementById('statePill');
+      const logEl = document.getElementById('log');
+      const replyEl = document.getElementById('reply');
+
+      const SILENCE_MS = 1200;
+      const CHECK_MS = 100;
+      const TIMESLICE_MS = 150;
+      const VOLUME_THRESHOLD = 0.008;
+      const MIN_UTTERANCE_MS = 400;
+
+      let stream = null;
+      let mediaRecorder = null;
+      let audioContext = null;
+      let analyser = null;
+      let source = null;
+      let buffer = [];
+      let speaking = false;
+      let speechStartTime = null;
+      let silenceCount = 0;
+      let paused = false;
+      let sending = false;
+
+      function setStatus(msg, cls) {
+        statusEl.textContent = msg;
+        statusEl.className = 'status' + (cls ? ' ' + cls : '');
+      }
+
+      function setState(label, on) {
+        statePill.textContent = label;
+        statePill.className = 'pill' + (on ? ' on' : '');
+      }
+
+      function appendLog(msg) {
+        logEl.textContent = (logEl.textContent ? logEl.textContent + '\n' : '') + msg;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function getVolume() {
+        if (!analyser) return 0;
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += (data[i] - 128) * (data[i] - 128);
+        return Math.sqrt(sum / data.length) / 128;
+      }
+
+      async function sendAudio(blob) {
+        if (!chatId) { appendLog('No chat_id.'); return; }
+        if (blob.size < 2000) return;
+        sending = true;
+        setStatus('Bot thinking…', 'bot');
+        setState('Sending', false);
+        const form = new FormData();
+        form.append('audio', blob, 'audio.webm');
+        form.append('chat_id', chatId);
+        try {
+          const r = await fetch('/call/audio', { method: 'POST', body: form });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            appendLog('Error: ' + (data.detail || r.statusText));
+            setStatus('Error. Still listening.', 'listening');
+            setState('Listening', true);
+            sending = false;
+            return;
+          }
+          if (data.transcript) appendLog('You: ' + data.transcript);
+          if (data.reply) {
+            appendLog('Bot: ' + data.reply);
+            replyEl.textContent = data.reply;
+            replyEl.style.display = 'block';
+            setStatus('Bot replying…', 'bot');
+            try {
+              const ttsRes = await fetch('/call/tts?text=' + encodeURIComponent(data.reply.substring(0, 2000)));
+              if (ttsRes.ok) {
+                const ab = await ttsRes.arrayBuffer();
+                const audio = new Audio(URL.createObjectURL(new Blob([ab], { type: 'audio/ogg' })));
+                audio.onended = function() {
+                  setStatus('Listening… Speak when ready.', 'listening');
+                  setState('Listening', true);
+                  sending = false;
+                };
+                await audio.play();
+                return;
+              }
+            } catch (_) {}
+            setStatus('Listening… Speak when ready.', 'listening');
+            setState('Listening', true);
+          } else {
+            setStatus('Listening… Speak when ready.', 'listening');
+            setState('Listening', true);
+          }
+        } catch (e) {
+          appendLog('Request failed: ' + e.message);
+          setStatus('Error. Still listening.', 'listening');
+          setState('Listening', true);
+        }
+        sending = false;
+      }
+
+      function endUtterance() {
+        if (!speechStartTime || sending) return;
+        const now = Date.now();
+        if (now - speechStartTime < MIN_UTTERANCE_MS) {
+          speaking = false;
+          speechStartTime = null;
+          silenceCount = 0;
+          return;
+        }
+        const from = speechStartTime - 300;
+        const blobs = buffer.filter(function(b) { return b.t >= from; }).map(function(b) { return b.blob; });
+        if (blobs.length === 0) {
+          speaking = false;
+          speechStartTime = null;
+          silenceCount = 0;
+          return;
+        }
+        const blob = new Blob(blobs, { type: 'audio/webm' });
+        speaking = false;
+        speechStartTime = null;
+        silenceCount = 0;
+        sendAudio(blob);
+      }
+
+      function tick() {
+        if (!stream || paused || sending) return;
+        const vol = getVolume();
+        if (vol > VOLUME_THRESHOLD) {
+          if (!speaking) {
+            speaking = true;
+            speechStartTime = Date.now();
+          }
+          silenceCount = 0;
+        } else {
+          if (speaking) {
+            silenceCount += CHECK_MS;
+            if (silenceCount >= SILENCE_MS) endUtterance();
+          }
+        }
+      }
+
+      function startRecording() {
+        const opts = { mimeType: 'audio/webm;codecs=opus' };
+        if (!MediaRecorder.isTypeSupported(opts.mimeType)) opts.mimeType = 'audio/webm';
+        mediaRecorder = new MediaRecorder(stream, opts);
+        buffer = [];
+        mediaRecorder.ondataavailable = function(e) {
+          if (e.data.size) buffer.push({ blob: e.data, t: Date.now() });
+          while (buffer.length > 200) buffer.shift();
+        };
+        mediaRecorder.start(TIMESLICE_MS);
+      }
+
+      async function startConversation() {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          analyser = audioContext.createAnalyser();
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.6;
+          source = audioContext.createMediaStreamSource(stream);
+          source.connect(analyser);
+          startRecording();
+          startBtn.style.display = 'none';
+          pauseBtn.style.display = 'inline-block';
+          setStatus('Listening… Speak when ready.', 'listening');
+          setState('Listening', true);
+          setInterval(tick, CHECK_MS);
+        } catch (e) {
+          appendLog('Mic error: ' + e.message);
+        }
+      }
+
+      startBtn.onclick = startConversation;
+
+      pauseBtn.onclick = function() {
+        if (paused) {
+          paused = false;
+          if (mediaRecorder && mediaRecorder.state === 'inactive') startRecording();
+          setStatus('Listening…', 'listening');
+          setState('Listening', true);
+          pauseBtn.textContent = 'Pause';
+        } else {
+          paused = true;
+          if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+          setStatus('Paused. Tap Pause to resume.', '');
+          setState('Paused', false);
+          pauseBtn.textContent = 'Resume';
+        }
+      };
+    })();
+  </script>
+</body>
+</html>
