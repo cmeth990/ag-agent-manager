@@ -241,12 +241,13 @@ def cancel_node(state: AgentState) -> Dict[str, Any]:
 def wait_for_approval_node(state: AgentState) -> Dict[str, Any]:
     """
     Node that waits for approval.
-    
-    In a real implementation with interrupts, this would pause the graph.
-    For now, we return the state and let the Telegram layer handle the UI.
+    Telegram layer will show Approve/Reject buttons; graph exits via end_wait so we don't loop.
     """
-    # The graph will stop here and return state
-    # Telegram layer will show approval buttons
+    return {}
+
+
+def end_wait_node(state: AgentState) -> Dict[str, Any]:
+    """No-op exit node when waiting for approval; single edge to END so graph stops (avoids recursion)."""
     return {}
 
 
@@ -362,13 +363,15 @@ def build_graph():
 
     workflow.add_conditional_edges("improve", route_improvement)
 
-    # From wait_for_approval: if still no decision, exit graph (caller shows UI and re-invokes on button press)
+    # From wait_for_approval: if still no decision, go to end_wait -> END (stops graph; caller shows UI and re-invokes on button press)
     def route_after_wait(state: AgentState) -> str:
         if state.get("approval_required") and not state.get("approval_decision"):
-            return END  # Pause: return to caller so Telegram can show Approve/Reject; re-invoke when user clicks
+            return "end_wait"  # dedicated exit node so graph always stops (no END-from-conditional quirks)
         return route_intent(state)
 
+    workflow.add_node("end_wait", end_wait_node)
     workflow.add_conditional_edges("wait_for_approval", route_after_wait)
+    workflow.add_edge("end_wait", END)
     workflow.add_edge("commit", END)
     workflow.add_edge("handle_reject", END)
     workflow.add_edge("apply_improvements", END)
@@ -433,12 +436,13 @@ async def run_graph(
     """
     graph = get_graph()
     
-    # Prepare config with thread_id
+    # Prepare config with thread_id; cap recursion so a bug can't spin forever
     run_config = {
         "configurable": {
             "thread_id": thread_id,
             **(config.get("configurable", {}) if config else {})
-        }
+        },
+        "recursion_limit": config.get("recursion_limit", 50) if config else 50,
     }
     
     # Invoke graph
