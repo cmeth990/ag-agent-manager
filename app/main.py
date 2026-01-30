@@ -1,9 +1,14 @@
 """FastAPI server with Telegram webhook endpoint."""
 import sys
+import os
+
+# Set before any LangGraph import so default recursion limit is 30 (avoids 10000-step loop)
+if "LANGGRAPH_DEFAULT_RECURSION_LIMIT" not in os.environ:
+    os.environ["LANGGRAPH_DEFAULT_RECURSION_LIMIT"] = "30"
+
 # Flush stderr immediately so Railway shows logs (Python buffers otherwise)
 print("[startup] main.py loading", file=sys.stderr, flush=True)
 import asyncio
-import os
 import logging
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
