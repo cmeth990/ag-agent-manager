@@ -203,9 +203,13 @@ async def call_audio(
         result = await run_graph(initial_state, thread_id, config={"recursion_limit": 30})
     except Exception as e:
         logger.exception("Call bridge: graph run failed")
+        reply_err = str(e).replace("\n", " ")[:200]
+        if "Recursion limit" in reply_err or "10000" in reply_err:
+            from app.graph.supervisor import get_recursion_diag_string
+            reply_err = f"{reply_err} | {get_recursion_diag_string()}"
         return JSONResponse(
             status_code=200,
-            content={"transcript": transcript, "reply": f"Error: {str(e)[:200]}"},
+            content={"transcript": transcript, "reply": f"Error: {reply_err}"},
         )
     reply = result.get("final_response") or result.get("error") or "Done."
     try:
@@ -581,7 +585,7 @@ async def telegram_webhook(request: Request):
                 error_msg = str(e).replace('\n', ' ').replace('\r', ' ')[:200]
                 if "Recursion limit" in error_msg or "10000" in error_msg:
                     from app.graph.supervisor import get_recursion_diag_string
-                    error_msg = f"{error_msg}\n\n{get_recursion_diag_string()}"
+                    error_msg = f"{error_msg} | {get_recursion_diag_string()}"
                 try:
                     await send_message(chat_id, f"❌ Error processing command: {error_msg}")
                 except Exception as send_err:

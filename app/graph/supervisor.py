@@ -463,8 +463,8 @@ _graph = None
 # Cap recursion limit so we never hit 10000 (LangGraph often ignores our invoke config)
 _RECURSION_CAP = 50
 
-# Bump this when changing recursion logic; grep logs for this to confirm deploy
-RECURSION_DIAG_VERSION = "recursion-diag-v12"
+# Bump this when changing recursion logic; confirm deploy at GET /diagnostics/recursion
+RECURSION_DIAG_VERSION = "recursion-diag-v13"
 
 
 def get_recursion_diag_string() -> str:
@@ -478,7 +478,7 @@ def get_recursion_diag_string() -> str:
     except Exception:
         default = "?"
         patched = False
-    return f"[{RECURSION_DIAG_VERSION}] env={env_val} default={default} patched={patched}"
+    return f"diag v13: env={env_val} default={default} patched={patched}"
 
 
 def _patch_langgraph_recursion_cap():
