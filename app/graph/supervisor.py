@@ -504,6 +504,14 @@ async def run_graph(
         "recursion_limit": recursion_limit,
     }
     logger.debug("Invoking graph with recursion_limit=%s", recursion_limit)
-    result = await graph.ainvoke(input_state, config=run_config)
-    
+
+    # Force LangGraph's default to our limit so ensure_config() uses it (env/merge can drop ours)
+    import langgraph._internal._config as _lg_config
+    _old_default = getattr(_lg_config, "DEFAULT_RECURSION_LIMIT", 10000)
+    try:
+        _lg_config.DEFAULT_RECURSION_LIMIT = recursion_limit
+        result = await graph.ainvoke(input_state, config=run_config)
+    finally:
+        _lg_config.DEFAULT_RECURSION_LIMIT = _old_default
+
     return result
