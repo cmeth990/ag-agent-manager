@@ -23,7 +23,7 @@ from app.graph.improvement_agent import (
     reject_improvements,
     push_changes_node
 )
-from app.graph.expansion import expansion_node
+from app.graph.expansion import expansion_node, begin_node
 from app.graph.checkpoint import create_checkpointer
 
 
@@ -104,8 +104,14 @@ def detect_intent(state: AgentState) -> Dict[str, Any]:
         intent = "push_changes"
     elif user_input.startswith("/graph") or "graph progress" in user_input or "knowledge graph progress" in user_input or "show graph" in user_input:
         intent = "graph_progress"
-    elif user_input.startswith("/expand") or "build the kg" in user_input or "build the knowledge graph" in user_input or "autonomous expand" in user_input:
+    elif user_input.startswith("/expand") or "build the kg" in user_input or "build the knowledge graph" in user_input or "autonomous expand" in user_input or (user_input.strip() == "continue" or (user_input.strip().startswith("continue") and len(user_input.split()) <= 2)):
         intent = "autonomous_expand"
+    elif any(phrase in user_input for phrase in (
+        "begin", "start", "go", "get started", "let's go", "start building", "make the knowledge graph",
+        "iterate", "run", "get to work", "do it", "go ahead", "yes go", "lets go", "begin building",
+        "start the kg", "start the knowledge graph", "build it", "get going"
+    )) or user_input.strip().lower() in ("begin", "start", "go", "run"):
+        intent = "autonomous_begin"
     elif user_input.startswith("/improve") or (
         ("improve" in user_input or "make it better" in user_input or "fix the" in user_input or "enhance" in user_input or
          "optimize" in user_input or "refactor" in user_input or "update the" in user_input or "modify the" in user_input)
@@ -140,35 +146,25 @@ def help_node(state: AgentState) -> Dict[str, Any]:
 
 **Superintendent mission:** {mission}
 
+🚀 **Just say Begin or Start** — I'll expand the knowledge graph, iterate, and improve. I'll come to you for key decisions (e.g. committing changes). Say **continue** or **expand** for more cycles.
+
+**Natural triggers:** "begin", "start", "go", "get started", "let's go", "build the knowledge graph", "continue"
+
 Commands:
 /ingest <topic=...> - Ingest new knowledge
 /query <question> - Query the knowledge graph
 /gather sources for <domain> - Discover sources for a domain
 /fetch content for <domain> - Fetch content from discovered sources
-/scout domains - Discover new domains not in knowledge graph
-/test agents - Run source gatherer and domain scout in parallel
+/scout domains - Discover new domains
+/expand or "continue" - Another expansion cycle
 /status - Check bot status
 /cancel - Cancel current operation
-/expand - Autonomous KG expansion (discover sources across domains; key decisions still come to you)
-/graph or "graph progress" - Private link to KG progress (zoom by level)
+/graph - Private link to KG progress (zoom by level)
 /help - Show this help
 
-💡 **Improvement & expand KG (conversation-style):**
-• Improve agents: "/improve ..." or "Improve the source gatherer to ..." — I propose code changes; you Approve/Reject.
-• Expand the KG: "/ingest topic=X" or "Expand the knowledge graph" / "Add knowledge about photosynthesis" — I extract, link, write; you Approve/Reject to commit.
-• You can alternate: improve the agents, then expand the KG, then improve again. Multi-turn state is kept per chat.
-
-You can also say:
-• "Improve the source gatherer to handle rate limits better"
-• "Fix the domain scout to filter out more false positives"
-• "Add knowledge about algebra" (routes to ingest)
+💡 **Improvement & expand:** "/improve ..." or "Improve the source gatherer to ..." — I propose code changes; you Approve/Reject. "/ingest topic=X" or "Add knowledge about X" — I extract, link, write; you Approve/Reject to commit.
 
 /push - Push committed changes to GitHub
-
-Examples:
-/ingest topic=photosynthesis
-/gather sources for Algebra
-Improve error handling in the source discovery module
 """
     return {"final_response": help_text}
 
@@ -304,6 +300,7 @@ def build_graph():
     workflow.add_node("push_changes", push_changes_node)
     workflow.add_node("graph_progress", graph_progress_node)
     workflow.add_node("expansion", expansion_node)
+    workflow.add_node("begin", begin_node)
 
     # Add conditional edges from detect_intent
     def route_after_intent(state: AgentState) -> str:
@@ -322,6 +319,8 @@ def build_graph():
             return "graph_progress"
         elif intent == "autonomous_expand":
             return "expansion"
+        elif intent == "autonomous_begin":
+            return "begin"
         elif intent == "gather_sources":
             return "gather_sources"
         elif intent == "fetch_content":
@@ -376,6 +375,7 @@ def build_graph():
     workflow.add_edge("gather_sources", END)
     workflow.add_edge("graph_progress", END)
     workflow.add_edge("expansion", END)
+    workflow.add_edge("begin", END)
     workflow.add_edge("fetch_content", END)
     workflow.add_edge("scout_domains", END)
     workflow.add_edge("parallel_test", END)

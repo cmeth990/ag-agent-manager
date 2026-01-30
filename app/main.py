@@ -26,17 +26,8 @@ from app.task_state import set_task_status, TaskStatus, TaskStateRegistry
 
 def _trigger_mission_continue(chat_id: str) -> None:
     """Run mission work (e.g. expansion) in the meantime while a key decision is pending."""
-    if USE_DURABLE_QUEUE and os.getenv("DATABASE_URL"):
-        try:
-            from app.queue.durable_queue import get_queue
-            get_queue().enqueue("mission_continue", {"chat_id": str(chat_id)})
-            logger.info("Enqueued mission_continue for chat %s", chat_id)
-        except Exception as e:
-            logger.warning("Could not enqueue mission_continue: %s", e)
-    else:
-        from app.queue.mission_continue import run_mission_continue
-        asyncio.create_task(run_mission_continue(str(chat_id)))
-        logger.info("Started mission_continue task for chat %s", chat_id)
+    from app.queue.mission_continue import trigger_mission_continue
+    trigger_mission_continue(chat_id)
 
 # Load .env: first from project root (ag-agent-manager/.env), then cwd (overrides for deploy)
 from pathlib import Path

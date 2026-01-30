@@ -170,3 +170,47 @@ async def expansion_node(state: AgentState) -> Dict[str, Any]:
             "final_response": f"❌ Expansion run failed: {str(e)[:200]}. Try again or run `/gather sources for <domain>` for a single domain.",
             "error": str(e)[:500],
         }
+
+
+BEGIN_INTRO = (
+    "🚀 **Beginning.** I'll expand the knowledge graph, iterate, and improve. "
+    "I'll come to you for key decisions (e.g. committing changes). "
+    "Running first expansion cycle now.\n\n"
+)
+
+
+async def begin_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Entry point for "begin" / "start": run first expansion cycle and trigger a follow-up
+    so the bot keeps iterating. User can just say "begin" or "start" to get going.
+    """
+    chat_id = state.get("chat_id")
+    logger.info(f"Begin flow for chat {chat_id}")
+
+    try:
+        result = await run_expansion_cycle()
+        msg = BEGIN_INTRO + result["update_message"]
+        # Trigger another cycle in background so we keep iterating
+        try:
+            from app.queue.mission_continue import trigger_mission_continue
+            trigger_mission_continue(str(chat_id))
+        except Exception as e:
+            logger.warning("Could not trigger follow-up expansion: %s", e)
+        msg += "\n\n💡 I've started another cycle in the background. Say **continue** or **expand** for more, or use other commands anytime."
+        return {
+            "final_response": msg,
+            "working_notes": {
+                **(state.get("working_notes") or {}),
+                "expansion_result": {
+                    "domains_explored": result["domains_explored"],
+                    "total_sources": result["total_sources"],
+                    "with_primary_ids": result["with_primary_ids"],
+                },
+            },
+        }
+    except Exception as e:
+        logger.exception(f"Begin flow failed: {e}")
+        return {
+            "final_response": BEGIN_INTRO + f"❌ First cycle failed: {str(e)[:200]}. Try again or say **continue**.",
+            "error": str(e)[:500],
+        }

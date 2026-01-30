@@ -5,9 +5,28 @@ in the meantime (e.g. source discovery across domains) and optionally notify the
 """
 import asyncio
 import logging
+import os
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
+
+
+def trigger_mission_continue(chat_id: str) -> None:
+    """
+    Run one expansion cycle in the background (enqueue or create_task).
+    Call from main.py (after key decision) or from begin_node (to keep iterating).
+    """
+    use_queue = os.getenv("USE_DURABLE_QUEUE", "false").lower() == "true" and os.getenv("DATABASE_URL")
+    if use_queue:
+        try:
+            from app.queue.durable_queue import get_queue
+            get_queue().enqueue("mission_continue", {"chat_id": str(chat_id)})
+            logger.info("Enqueued mission_continue for chat %s", chat_id)
+        except Exception as e:
+            logger.warning("Could not enqueue mission_continue: %s", e)
+    else:
+        asyncio.create_task(run_mission_continue(str(chat_id)))
+        logger.info("Started mission_continue task for chat %s", chat_id)
 
 
 async def run_mission_continue(chat_id: str) -> Dict[str, Any]:
