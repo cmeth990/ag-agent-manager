@@ -66,7 +66,10 @@ def route_intent(state: AgentState) -> str:
     if state.get("final_response") and not state.get("approval_required"):
         return END
     
-    # Normal flow: extract -> link -> write
+    # Normal flow: extract -> link -> write (only enter extract if we haven't already run the pipeline)
+    # Without this guard, write -> route_intent can return "extract" (intent/user_input still set) and loop forever
+    if state.get("proposed_diff") or (state.get("working_notes") or {}).get("extracted"):
+        return END
     intent = state.get("intent")
     if intent == "ingest" or state.get("user_input"):
         return "extract"
@@ -499,19 +502,12 @@ async def run_graph(
     run_config = {
         "configurable": {
             "thread_id": thread_id,
+            "recursion_limit": recursion_limit,  # some code paths read from configurable
             **(config.get("configurable", {}) if config else {})
         },
         "recursion_limit": recursion_limit,
     }
-    logger.debug("Invoking graph with recursion_limit=%s", recursion_limit)
+    logger.info("Invoking graph with recursion_limit=%s", recursion_limit)
 
-    # Force LangGraph's default to our limit so ensure_config() uses it (env/merge can drop ours)
-    import langgraph._internal._config as _lg_config
-    _old_default = getattr(_lg_config, "DEFAULT_RECURSION_LIMIT", 10000)
-    try:
-        _lg_config.DEFAULT_RECURSION_LIMIT = recursion_limit
-        result = await graph.ainvoke(input_state, config=run_config)
-    finally:
-        _lg_config.DEFAULT_RECURSION_LIMIT = _old_default
-
+    result = await graph.ainvoke(input_state, config=run_config)
     return result
