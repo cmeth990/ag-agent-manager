@@ -7,49 +7,99 @@ from langchain_core.language_models import BaseChatModel
 logger = logging.getLogger(__name__)
 
 
-def get_llm_base() -> Optional[BaseChatModel]:
+# Moonshot/Kimi API is OpenAI-compatible; use global endpoint (not China) for privacy
+MOONSHOT_BASE_URL = "https://api.moonshot.ai/v1"
+
+
+def get_llm_manager() -> Optional[BaseChatModel]:
     """
-    Get configured LLM instance.
-    
-    Checks for API keys in order:
-    1. OPENAI_API_KEY -> ChatOpenAI
-    2. ANTHROPIC_API_KEY -> ChatAnthropic
-    
-    Returns:
-        LLM instance or None if no API key found
+    Get LLM for the manager (orchestration / improvement agent).
+    Uses OpenAI or Anthropic only — never Moonshot.
+    Priority: OPENAI_API_KEY, then ANTHROPIC_API_KEY.
     """
-    # Try OpenAI first
     openai_key = os.getenv("OPENAI_API_KEY")
     if openai_key:
         try:
             from langchain_openai import ChatOpenAI
-            logger.info("Using OpenAI ChatOpenAI")
-            # Use cheapest model: gpt-4o-mini (cheaper than gpt-3.5-turbo!)
-            # Can override with OPENAI_MODEL env var if needed
+            logger.info("Manager LLM: OpenAI")
             model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
             return ChatOpenAI(
-                model=model,  # Default: gpt-4o-mini (most cost-effective)
-                temperature=0.0,  # Deterministic extraction
+                model=model,
+                temperature=0.0,
                 api_key=openai_key
             )
         except ImportError:
             logger.warning("langchain-openai not installed, skipping OpenAI")
-    
-    # Try Anthropic
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     if anthropic_key:
         try:
             from langchain_anthropic import ChatAnthropic
-            logger.info("Using Anthropic ChatAnthropic")
+            logger.info("Manager LLM: Anthropic")
             return ChatAnthropic(
-                model="claude-3-haiku-20240307",  # Cost-effective model
+                model="claude-3-haiku-20240307",
                 temperature=0.0,
                 api_key=anthropic_key
             )
         except ImportError:
             logger.warning("langchain-anthropic not installed, skipping Anthropic")
-    
-    logger.warning("No LLM API key found. Set OPENAI_API_KEY or ANTHROPIC_API_KEY")
+    logger.warning("No manager LLM: set OPENAI_API_KEY or ANTHROPIC_API_KEY for improvement/orchestration")
+    return None
+
+
+def get_llm_base() -> Optional[BaseChatModel]:
+    """
+    Get configured LLM instance for agents (extractor, gatherer, scout, etc.).
+    Prefers Moonshot when set; then OpenAI; then Anthropic.
+    Order: MOONSHOT_API_KEY -> OPENAI_API_KEY -> ANTHROPIC_API_KEY.
+    """
+    # Agents: prefer Moonshot first
+    moonshot_key = os.getenv("MOONSHOT_API_KEY") or os.getenv("KIMI_API_KEY")
+    if moonshot_key:
+        try:
+            from langchain_openai import ChatOpenAI
+            model = os.getenv("MOONSHOT_MODEL", "moonshot-v1-8k")
+            logger.info("Agents LLM: Kimi/Moonshot (global endpoint)")
+            return ChatOpenAI(
+                model=model,
+                temperature=0.0,
+                api_key=moonshot_key,
+                base_url=MOONSHOT_BASE_URL,
+            )
+        except ImportError:
+            logger.warning("langchain-openai not installed, cannot use Moonshot")
+        except Exception as e:
+            logger.warning("Moonshot/Kimi init failed: %s", e)
+
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if openai_key:
+        try:
+            from langchain_openai import ChatOpenAI
+            logger.info("Agents LLM: OpenAI")
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            return ChatOpenAI(
+                model=model,
+                temperature=0.0,
+                api_key=openai_key
+            )
+        except ImportError:
+            logger.warning("langchain-openai not installed, skipping OpenAI")
+
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    if anthropic_key:
+        try:
+            from langchain_anthropic import ChatAnthropic
+            logger.info("Agents LLM: Anthropic")
+            return ChatAnthropic(
+                model="claude-3-haiku-20240307",
+                temperature=0.0,
+                api_key=anthropic_key
+            )
+        except ImportError:
+            logger.warning("langchain-anthropic not installed, skipping Anthropic")
+
+    logger.warning(
+        "No agents LLM: set MOONSHOT_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY"
+    )
     return None
 
 
@@ -91,26 +141,32 @@ def get_llm(
 
 def get_llm_for_agent(state: dict, agent_name: str) -> Optional[BaseChatModel]:
     """
-    Get cost-tracked LLM for an agent, extracting context from state.
-    
-    Args:
-        state: AgentState dict
-        agent_name: Name of the agent (e.g., "source_gatherer")
-    
-    Returns:
-        Tracked LLM instance or None
+    Get cost-tracked LLM for an agent.
+    Manager (improvement_agent) uses OpenAI/Anthropic only; other agents use Moonshot-first path.
     """
-    # Extract domain from state (common patterns)
     domain = None
     if "user_input" in state:
-        # Try to extract domain from user input or discovered_sources
         discovered = state.get("discovered_sources", {})
         if isinstance(discovered, dict):
             domains = discovered.get("domains", [])
             if domains:
-                domain = domains[0]  # Use first domain
-    
-    # Extract queue from state or use agent name
+                domain = domains[0]
     queue = state.get("queue", agent_name)
-    
-    return get_llm(domain=domain, queue=queue, agent=agent_name)
+
+    # Manager: improvement agent uses OpenAI/Anthropic only
+    if agent_name == "improvement_agent":
+        base_llm = get_llm_manager()
+    else:
+        base_llm = get_llm_base()
+    if not base_llm:
+        return None
+    try:
+        from app.llm.tracked_client import get_tracked_llm
+        return get_tracked_llm(
+            llm=base_llm,
+            domain=domain,
+            queue=queue,
+            agent=agent_name,
+        )
+    except Exception:
+        return base_llm

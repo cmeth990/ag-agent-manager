@@ -298,21 +298,24 @@ def get_tracked_llm(
     domain: Optional[str] = None,
     queue: Optional[str] = None,
     agent: Optional[str] = None,
+    llm: Optional[BaseChatModel] = None,
 ) -> Optional[TrackedLLM]:
     """
     Get a cost-tracked LLM instance.
-    
+
     Args:
         domain: Domain name for cost tracking (e.g., "Algebra")
         queue: Queue name for cost tracking (e.g., "source_gathering")
         agent: Agent name for cost tracking (e.g., "source_gatherer")
-    
+        llm: Optional pre-built LLM (e.g. manager LLM); if None, uses get_llm() (agents path)
+
     Returns:
         TrackedLLM wrapper or None if no LLM available
     """
     from app.llm.client import get_llm as _get_llm
-    
-    llm = _get_llm()
+
+    if llm is None:
+        llm = _get_llm()
     if not llm:
         return None
     
@@ -338,6 +341,17 @@ def get_tracked_llm(
         if hasattr(llm, 'model'):
             model_name = str(llm.model)
     
+    # Moonshot/Kimi (OpenAI-compatible with base_url)
+    if provider == "unknown" and hasattr(llm, "model"):
+        m = str(llm.model).lower()
+        if "moonshot" in m or "kimi" in m:
+            provider = "moonshot"
+            model_name = str(llm.model)
+    if getattr(llm, "base_url", None) and "moonshot" in str(llm.base_url).lower():
+        provider = "moonshot"
+        if hasattr(llm, "model"):
+            model_name = str(llm.model)
+
     # Fallback: check env vars
     import os
     if os.getenv("OPENAI_API_KEY") and provider == "unknown":
@@ -346,6 +360,9 @@ def get_tracked_llm(
     elif os.getenv("ANTHROPIC_API_KEY") and provider == "unknown":
         provider = "anthropic"
         model_name = "claude-3-haiku-20240307"
+    elif (os.getenv("MOONSHOT_API_KEY") or os.getenv("KIMI_API_KEY")) and provider == "unknown":
+        provider = "moonshot"
+        model_name = os.getenv("MOONSHOT_MODEL", "moonshot-v1-8k")
     
     return TrackedLLM(
         llm=llm,

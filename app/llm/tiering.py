@@ -51,15 +51,17 @@ def get_model_for_tier(tier: str, provider: Optional[str] = None) -> str:
     Returns:
         Model name
     """
-    # Auto-detect provider from env
+    # Auto-detect provider from env (agents path: prefer Moonshot first)
     if not provider:
-        if os.getenv("OPENAI_API_KEY"):
+        if os.getenv("MOONSHOT_API_KEY") or os.getenv("KIMI_API_KEY"):
+            provider = "moonshot"
+        elif os.getenv("OPENAI_API_KEY"):
             provider = "openai"
         elif os.getenv("ANTHROPIC_API_KEY"):
             provider = "anthropic"
         else:
             provider = "openai"  # Default
-    
+
     if provider == "openai":
         if tier == TIER_CHEAP:
             return os.getenv("OPENAI_MODEL_CHEAP", "gpt-4o-mini")
@@ -67,6 +69,13 @@ def get_model_for_tier(tier: str, provider: Optional[str] = None) -> str:
             return os.getenv("OPENAI_MODEL_MID", "gpt-4o")
         else:  # TIER_EXPENSIVE
             return os.getenv("OPENAI_MODEL_EXPENSIVE", "gpt-4-turbo")
+    elif provider == "moonshot":
+        if tier == TIER_CHEAP:
+            return os.getenv("MOONSHOT_MODEL_CHEAP", "moonshot-v1-8k")
+        elif tier == TIER_MID:
+            return os.getenv("MOONSHOT_MODEL_MID", "moonshot-v1-32k")
+        else:  # TIER_EXPENSIVE
+            return os.getenv("MOONSHOT_MODEL_EXPENSIVE", "moonshot-v1-128k")
     else:  # anthropic
         if tier == TIER_CHEAP:
             return os.getenv("ANTHROPIC_MODEL_CHEAP", "claude-3-haiku-20240307")
@@ -105,9 +114,22 @@ def get_llm_for_task(
     # Get model name for tier
     model_name = get_model_for_tier(tier)
     
-    # Create LLM instance
+    # Create LLM instance (agents: prefer Moonshot first)
     try:
-        if os.getenv("OPENAI_API_KEY"):
+        if os.getenv("MOONSHOT_API_KEY") or os.getenv("KIMI_API_KEY"):
+            from langchain_openai import ChatOpenAI
+            from app.llm.client import MOONSHOT_BASE_URL
+            key = os.getenv("MOONSHOT_API_KEY") or os.getenv("KIMI_API_KEY")
+            model_name = get_model_for_tier(tier, "moonshot")
+            llm = ChatOpenAI(
+                model=model_name,
+                temperature=0.0,
+                api_key=key,
+                base_url=MOONSHOT_BASE_URL,
+            )
+            logger.debug(f"Using Kimi/Moonshot {tier} tier model '{model_name}' for task '{task_type}'")
+            return llm
+        elif os.getenv("OPENAI_API_KEY"):
             from langchain_openai import ChatOpenAI
             llm = ChatOpenAI(
                 model=model_name,

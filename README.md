@@ -6,6 +6,8 @@ A Telegram bot that manages a knowledge graph using LangGraph with human-in-the-
 
 💰 **Ultra-Low-Cost Setup:** Can run for **~$0.10-1/month** with free tiers! See [COST_GUIDE.md](COST_GUIDE.md) for details.
 
+🔑 **API keys:** Step-by-step for Telegram, OpenAI, Anthropic, Kimi/Moonshot, Postgres, Neo4j → [docs/API_KEYS.md](docs/API_KEYS.md).
+
 ## Features
 
 - 🤖 Telegram bot interface for commands
