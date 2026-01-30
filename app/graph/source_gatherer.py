@@ -160,9 +160,9 @@ async def source_gatherer_node(state: AgentState) -> Dict[str, Any]:
         all_discovered[domain] = result
         all_sources.extend(result["sources"])
     
-    # Format response
+    # Format response (secondary → primary: we discover via free APIs and show primary IDs)
     response_parts = []
-    response_parts.append(f"📚 Source Discovery Results\n")
+    response_parts.append(f"📚 Source Discovery Results (secondary APIs → primary identifiers)\n")
     response_parts.append(f"{'='*60}\n")
     
     for domain, result in all_discovered.items():
@@ -186,11 +186,11 @@ async def source_gatherer_node(state: AgentState) -> Dict[str, Any]:
         response_parts.append(f"   Free Sources: {stats.get('free_sources', 0)} | Paid: {stats.get('paid_sources', 0)}")
         response_parts.append(f"   Source Types: {', '.join(stats['source_types'].keys())}")
         
-        # Top 5 sources (ranked by priority)
+        # Top 5 sources (ranked by priority) — show primary identifiers (DOI, arXiv, url)
         response_parts.append(f"\n   Top Sources (ranked by priority - high quality & free first):")
         for i, source in enumerate(sources[:5], 1):
             props = source.get("properties", {})
-            title = props.get("title", "Unknown")
+            title = (props.get("title") or "Unknown")[:60]
             quality = source.get("quality_score", 0)
             cost = source.get("cost_score", 0)
             priority = source.get("priority_score", 0)
@@ -198,8 +198,19 @@ async def source_gatherer_node(state: AgentState) -> Dict[str, Any]:
             source_type = props.get("type", "unknown")
             year = props.get("year", "?")
             cost_label = "FREE" if cost == 0.0 else f"${cost_tier.upper()}"
+            ids = props.get("identifiers") or {}
+            id_parts = []
+            if ids.get("doi"):
+                id_parts.append(f"DOI: {ids['doi'][:40]}{'…' if len(ids.get('doi','')) > 40 else ''}")
+            if ids.get("arxiv"):
+                id_parts.append(f"arXiv: {ids['arxiv']}")
+            if ids.get("url") and not id_parts:
+                u = ids["url"][:50] + ("…" if len(ids.get("url","")) > 50 else "")
+                id_parts.append(f"URL: {u}")
+            primary_ids = " | ".join(id_parts) if id_parts else "—"
             response_parts.append(f"   {i}. {title} ({source_type}, {year})")
             response_parts.append(f"      Quality: {quality:.3f} | Cost: {cost_label} | Priority: {priority:.3f}")
+            response_parts.append(f"      Primary IDs: {primary_ids}")
         
         # Recommendations
         if result.get("recommendations"):
@@ -220,7 +231,10 @@ async def source_gatherer_node(state: AgentState) -> Dict[str, Any]:
     response_parts.append(f"   Average Priority: {sum(s.get('priority_score', 0) for s in all_sources) / len(all_sources) if all_sources else 0:.3f}")
     
     # Option to fetch content
-    response_parts.append(f"\n💡 Next Step: Use '/fetch content for {domains[0]}' to gather actual content from top sources")
+    if all_sources:
+        response_parts.append(f"\n💡 Next Step: Use '/fetch content for {domains[0]}' to gather actual content from top sources")
+    else:
+        response_parts.append(f"\n💡 No sources found for this query. Try a broader or related term (e.g. 'numerology' for gematria, 'Hebrew literature', or 'religious studies') and run gather again.")
     
     # Store discovered sources in state for potential KG insertion
     discovered_sources = {

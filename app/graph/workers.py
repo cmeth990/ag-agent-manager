@@ -604,6 +604,7 @@ def writer_node(state: AgentState) -> Dict[str, Any]:
         "proposed_diff": diff,
         "diff_id": diff_id,
         "approval_required": True,
+        "crucial_decision_type": "kg_write",
         "final_response": f"📝 Proposed KG changes:\n\n{format_diff_summary(diff)}\n\nPlease review and approve or reject."
     }
     try:
@@ -628,6 +629,8 @@ async def commit_node(state: AgentState) -> Dict[str, Any]:
         return {
             "proposed_diff": None,
             "approval_required": False,
+            "crucial_decision_type": None,
+            "crucial_decision_context": None,
             "final_response": "❌ Changes rejected. Please provide clarification or a new command."
         }
     
@@ -656,6 +659,8 @@ async def commit_node(state: AgentState) -> Dict[str, Any]:
         out = {
             "proposed_diff": None,
             "approval_required": False,
+            "crucial_decision_type": None,
+            "crucial_decision_context": None,
             "final_response": response
         }
     else:
@@ -676,6 +681,8 @@ def handle_reject_node(state: AgentState) -> Dict[str, Any]:
     return {
         "proposed_diff": None,
         "approval_required": False,
+        "crucial_decision_type": None,
+        "crucial_decision_context": None,
         "final_response": "❌ Changes rejected. What would you like to do instead?"
     }
 

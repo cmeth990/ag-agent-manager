@@ -16,6 +16,8 @@ class AgentState(TypedDict):
         diff_id: Unique identifier for this diff (for approval tracking)
         approval_required: Whether human approval is needed
         approval_decision: "approve" or "reject" or None
+        crucial_decision_type: When approval is required, which kind (kg_write, code_change, etc.)
+        crucial_decision_context: Optional extra context for the key decision
         final_response: Final message to send to user
         error: Error message if processing failed
     """
@@ -28,5 +30,7 @@ class AgentState(TypedDict):
     diff_id: Optional[str]
     approval_required: bool
     approval_decision: Optional[str]
+    crucial_decision_type: Optional[str]
+    crucial_decision_context: Optional[str]
     final_response: Optional[str]
     error: Optional[str]

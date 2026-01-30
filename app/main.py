@@ -20,7 +20,23 @@ from app.telegram import (
 )
 from app.graph.supervisor import run_graph
 from app.graph.state import AgentState
+from app.mission import get_crucial_decision_label
 from app.task_state import set_task_status, TaskStatus, TaskStateRegistry
+
+
+def _trigger_mission_continue(chat_id: str) -> None:
+    """Run mission work (e.g. expansion) in the meantime while a key decision is pending."""
+    if USE_DURABLE_QUEUE and os.getenv("DATABASE_URL"):
+        try:
+            from app.queue.durable_queue import get_queue
+            get_queue().enqueue("mission_continue", {"chat_id": str(chat_id)})
+            logger.info("Enqueued mission_continue for chat %s", chat_id)
+        except Exception as e:
+            logger.warning("Could not enqueue mission_continue: %s", e)
+    else:
+        from app.queue.mission_continue import run_mission_continue
+        asyncio.create_task(run_mission_continue(str(chat_id)))
+        logger.info("Started mission_continue task for chat %s", chat_id)
 
 # Load .env: first from project root (ag-agent-manager/.env), then cwd (overrides for deploy)
 from pathlib import Path
@@ -49,9 +65,10 @@ async def lifespan(app: FastAPI):
     """Start background worker when durable queue is enabled."""
     global _worker_task
     if USE_DURABLE_QUEUE and os.getenv("DATABASE_URL"):
-        from app.queue.worker import start_worker_background, TASK_TYPE_GRAPH_RUN
-        _worker_task = start_worker_background(task_type=TASK_TYPE_GRAPH_RUN)
-        logger.info("Durable queue worker started")
+        from app.queue.worker import start_worker_background
+        # task_type=None so worker processes both graph_run and mission_continue
+        _worker_task = start_worker_background(task_type=None)
+        logger.info("Durable queue worker started (graph_run + mission_continue)")
     yield
     if _worker_task and not _worker_task.done():
         _worker_task.cancel()
@@ -352,15 +369,20 @@ async def telegram_webhook(request: Request):
             
             # Check if approval is required (for both diff and improvements)
             if result.get("approval_required") and (result.get("diff_id") or result.get("proposed_changes")):
-                # Send approval message with buttons
+                # Send approval message with buttons; prefix with key decision label when set
                 diff_id = result.get("diff_id") or f"improve_{hash(result.get('user_input', '')) % 10000}"
                 response_text = result.get("final_response", "Please approve or reject the proposed changes.")
-                
+                crucial_type = result.get("crucial_decision_type")
+                if crucial_type:
+                    label = get_crucial_decision_label(crucial_type)
+                    response_text = f"🔑 **Key decision: {label}**\n\n{response_text}"
                 keyboard = build_approval_keyboard(diff_id)
                 try:
                     await send_message(chat_id, response_text, reply_markup=keyboard)
                 except Exception as e:
                     logger.error(f"Error sending approval message: {e}")
+                # Continue mission work in the meantime (expansion/discovery) so we get closer while user decides
+                _trigger_mission_continue(chat_id)
             elif result.get("final_response"):
                 # Send regular response
                 try:
@@ -444,6 +466,10 @@ async def telegram_webhook(request: Request):
                     state_update["user_input"] = current_state["user_input"]
                 if "intent" in current_state:
                     state_update["intent"] = current_state["intent"]
+                if "crucial_decision_type" in current_state:
+                    state_update["crucial_decision_type"] = current_state["crucial_decision_type"]
+                if "crucial_decision_context" in current_state:
+                    state_update["crucial_decision_context"] = current_state["crucial_decision_context"]
             
             # Run graph - it will merge our update with checkpoint state
             result = await run_graph(state_update, thread_id)

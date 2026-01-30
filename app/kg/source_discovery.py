@@ -163,6 +163,30 @@ async def discover_sources_for_domain(
             else:
                 all_sources.extend(result)
     
+    # If 0 sources (niche or rare domain), retry with expanded queries to improve recall
+    if not all_sources and discovery_tasks:
+        expanded = [f"{domain_name} overview", f"{domain_name} introduction", f"{domain_name} history", f"{domain_name} research"]
+        expanded_queries = list(dict.fromkeys(search_queries + expanded))[:8]
+        logger.info(f"Zero sources for '{domain_name}', retrying with expanded queries: {expanded_queries[:4]}...")
+        retry_tasks = []
+        if not source_types or "academic" in source_types:
+            retry_tasks.append(discover_academic_sources(expanded_queries, domain_name))
+        if not source_types or "educational" in source_types:
+            retry_tasks.append(discover_educational_sources(expanded_queries, domain_name))
+        if not source_types or "general" in source_types:
+            retry_tasks.append(discover_general_sources(expanded_queries, domain_name))
+        if retry_tasks:
+            retry_results = await asyncio.gather(*retry_tasks, return_exceptions=True)
+            seen_ids = {s.get("id") for s in all_sources}
+            for result in retry_results:
+                if isinstance(result, Exception):
+                    logger.warning(f"Retry discovery failed: {result}")
+                else:
+                    for s in result:
+                        if s.get("id") not in seen_ids:
+                            seen_ids.add(s.get("id"))
+                            all_sources.append(s)
+    
     # Canonicalize primary identifiers (methodology: free secondaries identify primaries via DOI/arXiv/etc.)
     for source in all_sources:
         enrich_source_with_primary_identifiers(source)
@@ -265,6 +289,10 @@ async def discover_sources_for_domain(
     unique_types = len(stats["source_types"])
     if unique_types < 2:
         recommendations.append("Low source diversity. Seek different source types.")
+    
+    # When zero sources, suggest broader/related terms
+    if len(top_sources) == 0 and len(all_sources) == 0:
+        recommendations.append("Try a related or broader domain (e.g. numerology, religious studies, Hebrew literature) and run gather again.")
     
     return {
         "sources": top_sources,

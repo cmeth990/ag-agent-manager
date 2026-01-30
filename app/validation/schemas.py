@@ -135,6 +135,7 @@ CONTENT_FETCHER_PARSE_SCHEMA = {
 STATE_UPDATE_ALLOWLIST = frozenset({
     "user_input", "chat_id", "intent", "task_queue", "working_notes",
     "proposed_diff", "diff_id", "approval_required", "approval_decision",
+    "crucial_decision_type", "crucial_decision_context",
     "final_response", "error", "proposed_changes", "improvement_plan",
     "discovered_sources", "scouting_results", "fetched_content"
 })

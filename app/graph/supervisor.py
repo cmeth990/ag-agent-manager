@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Any
 from langgraph.graph import StateGraph, END
 from app.graph.state import AgentState
+from app.mission import get_mission_summary
 from app.graph.workers import (
     extractor_node,
     linker_node,
@@ -22,6 +23,7 @@ from app.graph.improvement_agent import (
     reject_improvements,
     push_changes_node
 )
+from app.graph.expansion import expansion_node
 from app.graph.checkpoint import create_checkpointer
 
 
@@ -102,6 +104,8 @@ def detect_intent(state: AgentState) -> Dict[str, Any]:
         intent = "push_changes"
     elif user_input.startswith("/graph") or "graph progress" in user_input or "knowledge graph progress" in user_input or "show graph" in user_input:
         intent = "graph_progress"
+    elif user_input.startswith("/expand") or "build the kg" in user_input or "build the knowledge graph" in user_input or "autonomous expand" in user_input:
+        intent = "autonomous_expand"
     elif user_input.startswith("/improve") or (
         ("improve" in user_input or "make it better" in user_input or "fix the" in user_input or "enhance" in user_input or
          "optimize" in user_input or "refactor" in user_input or "update the" in user_input or "modify the" in user_input)
@@ -131,7 +135,10 @@ def detect_intent(state: AgentState) -> Dict[str, Any]:
 
 def help_node(state: AgentState) -> Dict[str, Any]:
     """Handle /help command."""
-    help_text = """🤖 Telegram KG Manager Bot
+    mission = get_mission_summary()
+    help_text = f"""🤖 Telegram KG Manager Bot
+
+**Superintendent mission:** {mission}
 
 Commands:
 /ingest <topic=...> - Ingest new knowledge
@@ -142,6 +149,7 @@ Commands:
 /test agents - Run source gatherer and domain scout in parallel
 /status - Check bot status
 /cancel - Cancel current operation
+/expand - Autonomous KG expansion (discover sources across domains; key decisions still come to you)
 /graph or "graph progress" - Private link to KG progress (zoom by level)
 /help - Show this help
 
@@ -295,6 +303,7 @@ def build_graph():
     workflow.add_node("reject_improvements", reject_improvements)
     workflow.add_node("push_changes", push_changes_node)
     workflow.add_node("graph_progress", graph_progress_node)
+    workflow.add_node("expansion", expansion_node)
 
     # Add conditional edges from detect_intent
     def route_after_intent(state: AgentState) -> str:
@@ -311,6 +320,8 @@ def build_graph():
             return "push_changes"
         elif intent == "graph_progress":
             return "graph_progress"
+        elif intent == "autonomous_expand":
+            return "expansion"
         elif intent == "gather_sources":
             return "gather_sources"
         elif intent == "fetch_content":
@@ -364,6 +375,7 @@ def build_graph():
     workflow.add_edge("query", END)
     workflow.add_edge("gather_sources", END)
     workflow.add_edge("graph_progress", END)
+    workflow.add_edge("expansion", END)
     workflow.add_edge("fetch_content", END)
     workflow.add_edge("scout_domains", END)
     workflow.add_edge("parallel_test", END)

@@ -187,6 +187,7 @@ Respond with ONLY the complete modified file content in a code block:
         "proposed_changes": proposed_changes,
         "improvement_plan": plan,
         "approval_required": True,
+        "crucial_decision_type": "code_change",
         "diff_id": f"improve_{hash(user_input) % 10000}",
         "final_response": diff_summary
     }
@@ -341,6 +342,9 @@ async def apply_improvements(state: AgentState) -> Dict[str, Any]:
         
         if push_success:
             return {
+                "approval_required": False,
+                "crucial_decision_type": None,
+                "crucial_decision_context": None,
                 "final_response": (
                     f"✅ **Improvements Applied & Pushed to GitHub!**\n\n"
                     f"📝 **Modified Files:** {len(applied_files)}\n"
@@ -352,6 +356,9 @@ async def apply_improvements(state: AgentState) -> Dict[str, Any]:
             }
         else:
             return {
+                "approval_required": False,
+                "crucial_decision_type": None,
+                "crucial_decision_context": None,
                 "final_response": (
                     f"✅ **Improvements Applied & Committed!**\n\n"
                     f"📝 **Modified Files:** {len(applied_files)}\n"
@@ -365,6 +372,9 @@ async def apply_improvements(state: AgentState) -> Dict[str, Any]:
         logger.error(f"Git operation failed: {e}")
         return {
             "error": f"Git operation failed: {str(e)}",
+            "approval_required": False,
+            "crucial_decision_type": None,
+            "crucial_decision_context": None,
             "final_response": (
                 f"✅ **Files Modified Successfully**\n\n"
                 f"📝 **Modified:** {len(applied_files)}\n"
@@ -381,6 +391,8 @@ async def reject_improvements(state: AgentState) -> Dict[str, Any]:
         "proposed_changes": None,
         "improvement_plan": None,
         "approval_required": False,
+        "crucial_decision_type": None,
+        "crucial_decision_context": None,
         "final_response": "❌ **Improvements Rejected**\n\nNo changes were made to the codebase."
     }
 
