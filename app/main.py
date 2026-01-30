@@ -78,6 +78,32 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Telegram KG Manager Bot", lifespan=lifespan)
 
 
+def _log_recursion_diagnostics():
+    """Log recursion diagnostics once at startup for deploy verification."""
+    from app.graph.supervisor import RECURSION_DIAG_VERSION
+    env_val = os.environ.get("LANGGRAPH_DEFAULT_RECURSION_LIMIT")
+    try:
+        import langgraph._internal._config as _lg_config
+        default = getattr(_lg_config, "DEFAULT_RECURSION_LIMIT", None)
+        patched = getattr(_lg_config, "_recursion_cap_patched", False)
+    except Exception:
+        default = None
+        patched = False
+    logger.info(
+        "[%s] startup: env LANGGRAPH_DEFAULT_RECURSION_LIMIT=%s, langgraph DEFAULT_RECURSION_LIMIT=%s, patched=%s",
+        RECURSION_DIAG_VERSION, env_val, default, patched,
+    )
+
+
+@app.on_event("startup")
+async def _startup_recursion_diag():
+    """Log recursion diagnostics on startup (after app is ready)."""
+    try:
+        _log_recursion_diagnostics()
+    except Exception as e:
+        logger.warning("Startup recursion diag: %s", e)
+
+
 @app.get("/")
 async def root():
     """Health check endpoint."""
@@ -88,6 +114,31 @@ async def root():
 async def health():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.get("/diagnostics/recursion")
+async def diagnostics_recursion():
+    """
+    Diagnose recursion limit: env, LangGraph default, and whether ensure_config is patched.
+    Hit this after deploy to confirm which code is running and why limit might be 10000.
+    """
+    from app.graph.supervisor import RECURSION_DIAG_VERSION
+    try:
+        import langgraph._internal._config as _lg_config
+        default_limit = getattr(_lg_config, "DEFAULT_RECURSION_LIMIT", None)
+        patched = getattr(_lg_config, "_recursion_cap_patched", False)
+    except Exception as e:
+        default_limit = None
+        patched = False
+        logger.warning("diagnostics/recursion: %s", e)
+    return {
+        "recursion_diag_version": RECURSION_DIAG_VERSION,
+        "env_LANGGRAPH_DEFAULT_RECURSION_LIMIT": os.environ.get("LANGGRAPH_DEFAULT_RECURSION_LIMIT"),
+        "langgraph_DEFAULT_RECURSION_LIMIT": default_limit,
+        "ensure_config_patched": patched,
+        "hint": "If langgraph_DEFAULT_RECURSION_LIMIT is 10000, env was not set before first import. "
+                "If patched is True, ensure_config caps result; if still 10000, patch may not be applied in this process.",
+    }
 
 
 # ----- Call bridge: transcribe voice from bridge page, run graph, sync to Telegram -----
@@ -528,6 +579,9 @@ async def telegram_webhook(request: Request):
                 logger.error(f"Error running graph: {e}", exc_info=True)
                 # Clean error message - remove newlines and special chars
                 error_msg = str(e).replace('\n', ' ').replace('\r', ' ')[:200]
+                if "Recursion limit" in error_msg or "10000" in error_msg:
+                    from app.graph.supervisor import get_recursion_diag_string
+                    error_msg = f"{error_msg}\n\n{get_recursion_diag_string()}"
                 try:
                     await send_message(chat_id, f"❌ Error processing command: {error_msg}")
                 except Exception as send_err:

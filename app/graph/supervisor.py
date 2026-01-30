@@ -460,11 +460,63 @@ def build_graph():
 # Global graph instance (created on first import)
 _graph = None
 
+# Cap recursion limit so we never hit 10000 (LangGraph often ignores our invoke config)
+_RECURSION_CAP = 50
+
+# Bump this when changing recursion logic; grep logs for this to confirm deploy
+RECURSION_DIAG_VERSION = "recursion-diag-v12"
+
+
+def get_recursion_diag_string() -> str:
+    """Return one-line diagnostics (version, env, default, patched) for inclusion in error messages."""
+    import os
+    env_val = os.environ.get("LANGGRAPH_DEFAULT_RECURSION_LIMIT", "(not set)")
+    try:
+        import langgraph._internal._config as _lg_config
+        default = getattr(_lg_config, "DEFAULT_RECURSION_LIMIT", "?")
+        patched = getattr(_lg_config, "_recursion_cap_patched", False)
+    except Exception:
+        default = "?"
+        patched = False
+    return f"[{RECURSION_DIAG_VERSION}] env={env_val} default={default} patched={patched}"
+
+
+def _patch_langgraph_recursion_cap():
+    """Patch LangGraph ensure_config so recursion_limit is never above our cap."""
+    import langgraph._internal._config as _lg_config
+    if getattr(_lg_config, "_recursion_cap_patched", False):
+        logger.info("[%s] ensure_config already patched, skip", RECURSION_DIAG_VERSION)
+        return
+    default_before = getattr(_lg_config, "DEFAULT_RECURSION_LIMIT", None)
+    _original = _lg_config.ensure_config
+    cap_count = [0]  # mutable so wrapper can increment
+
+    def _capped(*configs):
+        out = _original(*configs)
+        prev = out.get("recursion_limit")
+        if prev is not None and prev > _RECURSION_CAP:
+            out["recursion_limit"] = _RECURSION_CAP
+            cap_count[0] += 1
+            if cap_count[0] <= 3:  # log first 3 caps only to avoid spam
+                logger.info(
+                    "[%s] ensure_config capped recursion_limit %s -> %s (call #%s)",
+                    RECURSION_DIAG_VERSION, prev, _RECURSION_CAP, cap_count[0],
+                )
+        return out
+
+    _lg_config.ensure_config = _capped
+    _lg_config._recursion_cap_patched = True
+    logger.info(
+        "[%s] Patched ensure_config: DEFAULT_RECURSION_LIMIT=%s, cap=%s",
+        RECURSION_DIAG_VERSION, default_before, _RECURSION_CAP,
+    )
+
 
 def get_graph():
     """Get or create the compiled graph."""
     global _graph
     if _graph is None:
+        _patch_langgraph_recursion_cap()
         logger.info("Building graph from scratch...")
         _graph = build_graph()
         logger.info("Graph built successfully")
@@ -507,7 +559,11 @@ async def run_graph(
         },
         "recursion_limit": recursion_limit,
     }
-    logger.info("Invoking graph with recursion_limit=%s", recursion_limit)
+    logger.info(
+        "[%s] run_graph ainvoke thread_id=%s recursion_limit=%s (top_level=%s configurable=%s)",
+        RECURSION_DIAG_VERSION, thread_id, recursion_limit,
+        run_config.get("recursion_limit"), run_config["configurable"].get("recursion_limit"),
+    )
 
     result = await graph.ainvoke(input_state, config=run_config)
     return result

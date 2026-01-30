@@ -1,4 +1,9 @@
 """Telegram KG Manager Bot Application."""
+import os
+
+# Must be first: set before any process imports LangGraph (Procfile also sets this; setdefault keeps Procfile value)
+os.environ.setdefault("LANGGRAPH_DEFAULT_RECURSION_LIMIT", "30")
+
 from pathlib import Path
 
 from dotenv import load_dotenv

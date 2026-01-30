@@ -113,6 +113,9 @@ async def _process_one_task(task_record) -> None:
         set_task_status(thread_id, TaskStatus.FAILED, error=str(e)[:500])
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
         error_msg = str(e).replace("\n", " ").replace("\r", " ")[:200]
+        if "Recursion limit" in error_msg or "10000" in error_msg:
+            from app.graph.supervisor import get_recursion_diag_string
+            error_msg = f"{error_msg}\n\n{get_recursion_diag_string()}"
         try:
             await send_message(int(chat_id), f"❌ Error processing command: {error_msg}")
         except Exception as send_err:
