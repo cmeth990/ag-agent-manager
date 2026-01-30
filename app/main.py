@@ -77,6 +77,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Telegram KG Manager Bot", lifespan=lifespan)
 
+# Change this each deploy to confirm Railway is serving new code (check GET / or GET /health)
+DEPLOY_ID = "recursion-v14"
+
 
 def _log_recursion_diagnostics():
     """Log recursion diagnostics once at startup for deploy verification."""
@@ -106,14 +109,14 @@ async def _startup_recursion_diag():
 
 @app.get("/")
 async def root():
-    """Health check endpoint."""
-    return {"status": "ok", "service": "telegram-kg-manager"}
+    """Health check endpoint. deploy_id confirms which build is running."""
+    return {"status": "ok", "service": "telegram-kg-manager", "deploy_id": DEPLOY_ID}
 
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
-    return {"status": "healthy"}
+    """Health check endpoint. deploy_id confirms which build is running."""
+    return {"status": "healthy", "deploy_id": DEPLOY_ID}
 
 
 @app.get("/diagnostics/recursion")
