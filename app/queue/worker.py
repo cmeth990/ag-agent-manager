@@ -77,7 +77,10 @@ async def _process_one_task(task_record) -> None:
     set_task_status(thread_id, TaskStatus.IN_PROGRESS, agent="supervisor")
 
     try:
-        result = await run_graph(initial_state, thread_id)
+        result = await run_graph(
+            initial_state, thread_id,
+            config={"recursion_limit": 30}
+        )
         set_task_status(thread_id, TaskStatus.COMPLETED, agent="supervisor")
 
         # Send Telegram response (same logic as main.py webhook); prefix key decision when set

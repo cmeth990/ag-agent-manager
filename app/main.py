@@ -344,7 +344,10 @@ async def telegram_webhook(request: Request):
             thread_id = str(chat_id)
             set_task_status(thread_id, TaskStatus.IN_PROGRESS, agent="supervisor")
             try:
-                result = await run_graph(initial_state, thread_id)
+                result = await run_graph(
+                    initial_state, thread_id,
+                    config={"recursion_limit": 30}
+                )
                 set_task_status(thread_id, TaskStatus.COMPLETED, agent="supervisor")
                 logger.info(f"Graph execution completed for {chat_id}, intent: {result.get('intent')}")
             except Exception as e:
@@ -463,7 +466,10 @@ async def telegram_webhook(request: Request):
                     state_update["crucial_decision_context"] = current_state["crucial_decision_context"]
             
             # Run graph - it will merge our update with checkpoint state
-            result = await run_graph(state_update, thread_id)
+            result = await run_graph(
+                state_update, thread_id,
+                config={"recursion_limit": 30}
+            )
             
             # Send result
             if result.get("final_response"):

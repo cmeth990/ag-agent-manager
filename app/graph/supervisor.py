@@ -251,6 +251,11 @@ def end_wait_node(state: AgentState) -> Dict[str, Any]:
     return {}
 
 
+def end_default_node(state: AgentState) -> Dict[str, Any]:
+    """No-op exit when intent doesn't match any route; single edge to END (avoid returning END from conditional)."""
+    return {}
+
+
 def build_graph():
     """
     Build and compile the LangGraph supervisor graph.
@@ -338,9 +343,11 @@ def build_graph():
         elif intent == "query":
             return "query"
         else:
-            return END
+            return "end_default"  # sink node -> END (never return END from conditional)
     
+    workflow.add_node("end_default", end_default_node)
     workflow.add_conditional_edges("detect_intent", route_after_intent)
+    workflow.add_edge("end_default", END)
     
     # Linear flow: extract -> link -> write
     # Note: extract and link are async, but LangGraph handles this
@@ -435,17 +442,18 @@ async def run_graph(
         Final state dict
     """
     graph = get_graph()
-    
-    # Prepare config with thread_id; cap recursion so a bug can't spin forever
+    # Recursion limit must be top-level in config; keep low so any loop fails fast (default 25)
+    recursion_limit = 25
+    if config and "recursion_limit" in config:
+        recursion_limit = int(config["recursion_limit"])
     run_config = {
         "configurable": {
             "thread_id": thread_id,
             **(config.get("configurable", {}) if config else {})
         },
-        "recursion_limit": config.get("recursion_limit", 50) if config else 50,
+        "recursion_limit": recursion_limit,
     }
-    
-    # Invoke graph
+    logger.debug("Invoking graph with recursion_limit=%s", recursion_limit)
     result = await graph.ainvoke(input_state, config=run_config)
     
     return result
