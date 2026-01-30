@@ -9,7 +9,8 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi import Query
 from app.auth import require_admin_key
 import uvicorn
 from app.telegram import (
@@ -21,7 +22,10 @@ from app.graph.supervisor import run_graph
 from app.graph.state import AgentState
 from app.task_state import set_task_status, TaskStatus, TaskStateRegistry
 
-# Load environment variables from .env file
+# Load .env: first from project root (ag-agent-manager/.env), then cwd (overrides for deploy)
+from pathlib import Path
+_project_root = Path(__file__).resolve().parent.parent
+load_dotenv(_project_root / ".env")
 load_dotenv()
 
 
@@ -166,6 +170,107 @@ async def list_stuck_tasks(threshold_minutes: int = 30):
     from app.queue.heartbeat import monitor_stuck_tasks
     result = await monitor_stuck_tasks(stuck_threshold_minutes=threshold_minutes, auto_retry=False)
     return result
+
+
+def _progress_dashboard_html() -> str:
+    """Single-page drill-down dashboard: zoom by level via expand/collapse."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KG Progress</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 1rem; background: #1a1a2e; color: #eee; }
+    h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+    .summary { color: #aaa; font-size: 0.9rem; margin-bottom: 1rem; }
+    .tree { list-style: none; padding-left: 0; margin: 0; }
+    .tree li { margin: 0.25rem 0; }
+    .node { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; border-radius: 6px; cursor: pointer; user-select: none; }
+    .node:hover { background: rgba(255,255,255,0.08); }
+    .node .count { color: #7dd3fc; font-variant-numeric: tabular-nums; min-width: 2.5rem; text-align: right; }
+    .node .toggle { width: 1rem; text-align: center; }
+    .node .toggle::before { content: "▶"; font-size: 0.7rem; }
+    .node.open .toggle::before { content: "▼"; }
+    .children { padding-left: 1.25rem; border-left: 1px solid rgba(255,255,255,0.15); margin-left: 0.5rem; }
+    .children.hidden { display: none; }
+    .level-0 .node { font-weight: 600; }
+    .level-1 .node { font-size: 0.95rem; }
+    .level-2 .node { font-size: 0.9rem; color: #ccc; }
+    .error { color: #f87171; }
+    .loading { color: #aaa; }
+  </style>
+</head>
+<body>
+  <h1>Knowledge Graph Progress</h1>
+  <p class="summary" id="summary">Loading…</p>
+  <ul class="tree" id="tree"></ul>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token") || "";
+    if (!token) {
+      document.getElementById("summary").textContent = "Missing or invalid link. Request a new link from the bot.";
+      document.getElementById("summary").className = "summary error";
+    } else {
+      fetch("/graph/progress/data?token=" + encodeURIComponent(token))
+        .then(r => r.ok ? r.json() : Promise.reject(new Error("Unauthorized")))
+        .then(data => {
+          document.getElementById("summary").textContent = "Total: " + (data.total || 0) + " nodes. Click a row to zoom in/out.";
+          renderTree(document.getElementById("tree"), data, 0);
+        })
+        .catch(() => {
+          document.getElementById("summary").textContent = "Link expired or invalid. Request a new link from the bot.";
+          document.getElementById("summary").className = "summary error";
+        });
+    }
+    function renderTree(ul, node, level) {
+      if (!node) return;
+      const children = node.children || [];
+      const hasChildren = children.length > 0;
+      const count = node.count != null ? node.count : node.total;
+      const li = document.createElement("li");
+      li.className = "level-" + Math.min(level, 2);
+      const div = document.createElement("div");
+      div.className = "node" + (hasChildren && level === 0 ? " open" : "");
+      div.innerHTML = "<span class=\"toggle\"></span><span class=\"label\">" + (node.label || "KG") + "</span><span class=\"count\">" + (count != null ? count : "") + "</span>";
+      li.appendChild(div);
+      if (hasChildren) {
+        const childUl = document.createElement("ul");
+        childUl.className = "children" + (level === 0 ? "" : " hidden");
+        children.forEach(c => renderTree(childUl, c, level + 1));
+        li.appendChild(childUl);
+        div.addEventListener("click", () => {
+          div.classList.toggle("open");
+          childUl.classList.toggle("hidden");
+        });
+      }
+      ul.appendChild(li);
+    }
+  </script>
+</body>
+</html>"""
+
+
+@app.get("/graph/progress")
+async def graph_progress_dashboard(token: Optional[str] = Query(None)):
+    """
+    Private dashboard: KG progress by hierarchy level. Requires valid token (from bot link).
+    Zoom in/out by expanding levels.
+    """
+    from app.kg.progress import validate_progress_view_token
+    if not token or not validate_progress_view_token(token):
+        raise HTTPException(status_code=403, detail="Invalid or expired link. Request a new link from the bot.")
+    return HTMLResponse(_progress_dashboard_html())
+
+
+@app.get("/graph/progress/data")
+async def graph_progress_data(token: Optional[str] = Query(None)):
+    """JSON tree for progress dashboard. Requires valid token."""
+    from app.kg.progress import validate_progress_view_token, get_progress_tree
+    if not token or not validate_progress_view_token(token):
+        raise HTTPException(status_code=403, detail="Invalid or expired token.")
+    return get_progress_tree()
 
 
 @app.post("/telegram/webhook")

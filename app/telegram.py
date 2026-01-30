@@ -1,7 +1,7 @@
 """Telegram Bot API utilities for sending messages and handling callbacks."""
 import os
 import httpx
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot"
@@ -66,6 +66,49 @@ async def send_message(
         response = await client.post(url, json=payload)
         response.raise_for_status()
         return response.json()
+
+
+async def send_photo(
+    chat_id: int,
+    photo: Union[bytes, str],
+    caption: Optional[str] = None,
+    parse_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Send a photo to a Telegram chat.
+    
+    Args:
+        chat_id: Telegram chat ID
+        photo: PNG/JPEG bytes or file_id/URL string
+        caption: Optional caption
+        parse_mode: Optional parse mode for caption (e.g. "Markdown", "HTML")
+    
+    Returns:
+        API response dict
+    """
+    token = get_bot_token()
+    url = f"{TELEGRAM_API_BASE}{token}/sendPhoto"
+    
+    if isinstance(photo, bytes):
+        async with httpx.AsyncClient() as client:
+            payload: Dict[str, Any] = {"chat_id": str(chat_id)}
+            if caption:
+                payload["caption"] = caption[:1024]
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+            files = {"photo": ("progress.png", photo, "image/png")}
+            response = await client.post(url, data=payload, files=files)
+    else:
+        payload = {"chat_id": chat_id, "photo": photo}
+        if caption:
+            payload["caption"] = caption
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload)
+    
+    response.raise_for_status()
+    return response.json()
 
 
 async def answer_callback_query(

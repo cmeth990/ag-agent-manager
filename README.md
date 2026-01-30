@@ -2,6 +2,8 @@
 
 A Telegram bot that manages a knowledge graph using LangGraph with human-in-the-loop approval for writes.
 
+📋 **One doc for all moving parts:** [docs/ARCHITECTURE_AND_MOVING_PARTS.md](docs/ARCHITECTURE_AND_MOVING_PARTS.md) — components, flows, config, API, and where to find more detail.
+
 💰 **Ultra-Low-Cost Setup:** Can run for **~$0.10-1/month** with free tiers! See [COST_GUIDE.md](COST_GUIDE.md) for details.
 
 ## Features

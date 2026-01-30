@@ -1,9 +1,16 @@
 """
 Source Discovery Module
 Discovers sources from multiple providers for a given domain.
+
+Methodology (audit trail spec): We use free/low-cost secondary sources (indexes, APIs)
+as an affordable way to discover and identify primary sources. We query Semantic Scholar,
+arXiv, OpenAlex, Wikipedia, OpenStax, etc.; they return metadata and stable primary
+identifiers (DOI, arXiv ID, URL). We canonicalize these into Source.identifiers so we
+can rank, dedupe, and fetch primary content without paying for proprietary indexes.
 """
 import logging
 import asyncio
+import re
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from app.kg.domains import get_domain_by_name
@@ -12,7 +19,68 @@ from app.circuit_breaker import check_source_allowed, record_source_success, rec
 
 logger = logging.getLogger(__name__)
 
-# Source discovery providers
+# Primary identifier patterns (for canonicalization from URLs/metadata)
+_DOI_PATTERN = re.compile(r"10\.\d{4,}/[^\s]+", re.I)
+_ARXIV_ID_PATTERN = re.compile(r"(\d{4}\.\d{4,5})(v\d+)?", re.I)
+
+
+def canonicalize_primary_identifiers(source: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Extract canonical primary identifiers from a source (DOI, arXiv ID, etc.).
+    Used to secure knowledge claims: we discover primaries via free secondary APIs
+    and store stable IDs for reproducibility and dedup.
+    Returns dict e.g. {"doi": "10.1234/foo", "arxiv": "2101.12345"}.
+    """
+    identifiers: Dict[str, str] = {}
+    props = source.get("properties") or {}
+    # DOI from property or URL
+    doi = props.get("doi")
+    if doi and _DOI_PATTERN.search(doi):
+        identifiers["doi"] = doi.strip()
+    url = props.get("url") or ""
+    if not identifiers.get("doi") and "doi.org" in url:
+        m = _DOI_PATTERN.search(url)
+        if m:
+            identifiers["doi"] = m.group(0)
+    # arXiv from property or URL or id
+    arxiv = props.get("arxiv_id") or props.get("arxivId")
+    if arxiv:
+        identifiers["arxiv"] = str(arxiv).strip()
+    if not identifiers.get("arxiv") and ("arxiv.org" in url or "arxiv.org/abs" in url):
+        for part in url.replace("?", "&").split("&"):
+            if "arxiv.org/abs/" in part or "arxiv.org/pdf/" in part:
+                part = part.split("arxiv.org/abs/")[-1].split("arxiv.org/pdf/")[-1].split("/")[0]
+                m = _ARXIV_ID_PATTERN.match(part)
+                if m:
+                    identifiers["arxiv"] = m.group(1)
+                break
+    if not identifiers.get("arxiv") and source.get("id", "").startswith("SRC:arxiv_"):
+        aid = source["id"].replace("SRC:arxiv_", "").strip()
+        if _ARXIV_ID_PATTERN.match(aid.split("v")[0]):
+            identifiers["arxiv"] = aid
+    # Stable URL as primary id for OER/educational (OpenStax, Khan, MIT OCW) when no DOI/arXiv
+    if not identifiers and url:
+        for prefix in ("https://openstax.org/", "https://www.khanacademy.org/", "https://ocw.mit.edu/"):
+            if url.startswith(prefix):
+                identifiers["url"] = url.strip()
+                break
+    return identifiers
+
+
+def enrich_source_with_primary_identifiers(source: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Set source.properties.identifiers from canonical primary IDs (and discovered_via when applicable).
+    Call after building a source from a secondary API so the pipeline explicitly tracks secondary → primary.
+    """
+    identifiers = canonicalize_primary_identifiers(source)
+    props = source.get("properties") or {}
+    if identifiers:
+        props["identifiers"] = identifiers
+    source["properties"] = props
+    return source
+
+
+# Source discovery providers (free/low-cost secondaries that help us identify primaries)
 SOURCE_PROVIDERS = {
     "academic": {
         "semantic_scholar": {"enabled": True, "priority": 1},
@@ -94,6 +162,10 @@ async def discover_sources_for_domain(
                 logger.error(f"Source discovery task failed: {result}")
             else:
                 all_sources.extend(result)
+    
+    # Canonicalize primary identifiers (methodology: free secondaries identify primaries via DOI/arXiv/etc.)
+    for source in all_sources:
+        enrich_source_with_primary_identifiers(source)
     
     # Evaluate and rank sources
     evaluated_sources = []

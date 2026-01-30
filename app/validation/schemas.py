@@ -13,7 +13,7 @@ INTENT_ALLOWLIST = frozenset({
     "ingest", "query", "update", "source_gather", "content_fetch",
     "domain_scout", "improve", "status", "help", "unknown",
     "gather_sources", "fetch_content", "scout_domains", "parallel_test",
-    "cancel", "push_changes",
+    "cancel", "push_changes", "graph_progress",
 })
 
 # Valid approval decisions

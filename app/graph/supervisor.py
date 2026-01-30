@@ -1,4 +1,5 @@
 """LangGraph supervisor definition with approval flow."""
+import asyncio
 import logging
 from typing import Dict, Any
 from langgraph.graph import StateGraph, END
@@ -99,6 +100,8 @@ def detect_intent(state: AgentState) -> Dict[str, Any]:
         intent = "cancel"
     elif user_input.startswith("/push") or "push to github" in user_input or "push changes" in user_input:
         intent = "push_changes"
+    elif user_input.startswith("/graph") or "graph progress" in user_input or "knowledge graph progress" in user_input or "show graph" in user_input:
+        intent = "graph_progress"
     elif user_input.startswith("/improve") or (
         ("improve" in user_input or "make it better" in user_input or "fix the" in user_input or "enhance" in user_input or
          "optimize" in user_input or "refactor" in user_input or "update the" in user_input or "modify the" in user_input)
@@ -139,6 +142,7 @@ Commands:
 /test agents - Run source gatherer and domain scout in parallel
 /status - Check bot status
 /cancel - Cancel current operation
+/graph or "graph progress" - Private link to KG progress (zoom by level)
 /help - Show this help
 
 💡 **Improvement & expand KG (conversation-style):**
@@ -159,6 +163,48 @@ Examples:
 Improve error handling in the source discovery module
 """
     return {"final_response": help_text}
+
+
+async def graph_progress_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Send a private link to the KG progress dashboard (zoom in/out by level).
+    No per-category images; one link that opens a drill-down view.
+    """
+    import os
+    from app.kg.progress import (
+        get_progress_stats,
+        get_progress_summary_text,
+        create_progress_view_token,
+    )
+
+    chat_id = state.get("chat_id")
+    if not chat_id:
+        return {"final_response": "❌ No chat ID."}
+
+    try:
+        stats = get_progress_stats()
+        summary = get_progress_summary_text(stats)
+        token = create_progress_view_token(str(chat_id))
+        base_url = (os.getenv("PUBLIC_URL") or os.getenv("RAILWAY_URL") or "").rstrip("/")
+        if not token:
+            return {
+                "final_response": f"📊 {summary}\n\n"
+                "❌ Private dashboard link requires GRAPH_VIEW_SECRET or ADMIN_API_KEY to be set (Railway Variables)."
+            }
+        if not base_url:
+            return {
+                "final_response": f"📊 {summary}\n\n"
+                "❌ Set PUBLIC_URL or RAILWAY_URL in Railway Variables to your app URL (e.g. https://your-app.up.railway.app)."
+            }
+        link = f"{base_url}/graph/progress?token={token}"
+        return {
+            "final_response": f"📊 {summary}\n\n"
+            f"🔗 **Private dashboard** (zoom in/out by level, link valid ~1 hour):\n{link}\n\n"
+            "Click to open in browser; expand rows to drill down (Upper Ontology → Categories → Domains)."
+        }
+    except Exception as e:
+        logger.exception("Graph progress failed")
+        return {"final_response": f"❌ Failed: {str(e)[:200]}"}
 
 
 def status_node(state: AgentState) -> Dict[str, Any]:
@@ -248,7 +294,8 @@ def build_graph():
     workflow.add_node("apply_improvements", apply_improvements)
     workflow.add_node("reject_improvements", reject_improvements)
     workflow.add_node("push_changes", push_changes_node)
-    
+    workflow.add_node("graph_progress", graph_progress_node)
+
     # Add conditional edges from detect_intent
     def route_after_intent(state: AgentState) -> str:
         intent = state.get("intent")
@@ -262,6 +309,8 @@ def build_graph():
             return "improve"
         elif intent == "push_changes":
             return "push_changes"
+        elif intent == "graph_progress":
+            return "graph_progress"
         elif intent == "gather_sources":
             return "gather_sources"
         elif intent == "fetch_content":
@@ -314,6 +363,7 @@ def build_graph():
     workflow.add_edge("cancel", END)
     workflow.add_edge("query", END)
     workflow.add_edge("gather_sources", END)
+    workflow.add_edge("graph_progress", END)
     workflow.add_edge("fetch_content", END)
     workflow.add_edge("scout_domains", END)
     workflow.add_edge("parallel_test", END)

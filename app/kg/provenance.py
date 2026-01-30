@@ -15,12 +15,15 @@ def create_provenance(
     confidence: float = 1.0,
     reasoning: Optional[str] = None,
     evidence: Optional[str] = None,
+    last_verified_at: Optional[str] = None,
+    evidence_summary: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create provenance metadata for a KG node or edge.
     Attach this to every node/edge so we can explain "why does this exist?"
+    Optional last_verified_at (ISO8601) and evidence_summary support audit trail spec.
     """
-    return {
+    out = {
         "source_agent": str(source_agent),
         "source_document": str(source_document) if source_document else None,
         "created_at": datetime.utcnow().isoformat() + "Z",
@@ -28,6 +31,11 @@ def create_provenance(
         "reasoning": str(reasoning)[:2000] if reasoning else None,
         "evidence": str(evidence)[:2000] if evidence else None,
     }
+    if last_verified_at is not None:
+        out["last_verified_at"] = str(last_verified_at)
+    if evidence_summary is not None:
+        out["evidence_summary"] = str(evidence_summary)[:2000]
+    return out
 
 
 def attach_provenance_to_edge(

@@ -16,7 +16,11 @@ NODE_TYPES = {
         "prefix": "CL",
         "description": "Evidence-backed statement (definition, empirical, theoretical, etc.)",
         "required_properties": ["text", "claimType"],
-        "optional_properties": ["scope", "confidence", "supports", "refutations", "sourceId", "conceptId"]
+        "optional_properties": [
+            "scope", "confidence", "supports", "refutations", "sourceId", "conceptId",
+            "confidence_tier", "p_error", "contradiction_status", "last_verified_at", "evidence_summary",
+            "domain_key", "upper_ontology_type"
+        ]
     },
     "Position": {
         "prefix": "PO",
@@ -34,7 +38,10 @@ NODE_TYPES = {
         "prefix": "SRC",
         "description": "Academic papers, books, expert opinions",
         "required_properties": ["title"],
-        "optional_properties": ["authors", "year", "type", "doi", "url", "trustScore", "impactFactor"]
+        "optional_properties": [
+            "authors", "year", "type", "doi", "url", "trustScore", "impactFactor",
+            "identifiers", "license_flags", "issuer", "cluster_id"
+        ]
     },
     "Method": {
         "prefix": "M",
@@ -104,6 +111,20 @@ EDGE_TYPES = {
         "from_types": ["Evidence"],
         "to_types": ["Claim"],
         "properties": ["strength", "methodology", "replicationStatus"]
+    },
+    "QUALIFIES": {
+        "description": "Source/evidence qualifies claim (nuance, scope, condition)",
+        "directional": True,
+        "from_types": ["Evidence", "Source"],
+        "to_types": ["Claim"],
+        "properties": ["extraction_method", "scope_alignment_score", "strength"]
+    },
+    "ANCHORS": {
+        "description": "Source/evidence defines or anchors claim (primary definitional support)",
+        "directional": True,
+        "from_types": ["Evidence", "Source"],
+        "to_types": ["Claim"],
+        "properties": ["extraction_method", "scope_alignment_score", "strength"]
     },
     "CONTRADICTS": {
         "description": "Claims contradict each other",
@@ -411,6 +432,7 @@ Node Types:
 Edge Types (Standard):
 - DEFINES: Claim → Concept
 - SUPPORTS/REFUTES: Evidence → Claim
+- QUALIFIES/ANCHORS: Source or Evidence → Claim (extraction_method, scope_alignment_score)
 - PREREQ/PrerequisiteOf: Concept → Concept (learning progression)
 - PartOf: Concept → Concept (hierarchical)
 - IsA: Concept → Concept (taxonomy)
