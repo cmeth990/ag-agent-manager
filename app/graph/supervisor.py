@@ -304,6 +304,9 @@ def build_graph():
 
     # Add conditional edges from detect_intent
     def route_after_intent(state: AgentState) -> str:
+        # Re-invoke after Approve/Reject: go to wait_for_approval so route_after_wait routes to commit/handle_reject/etc.
+        if state.get("approval_decision") and (state.get("proposed_diff") or state.get("proposed_changes")):
+            return "wait_for_approval"
         intent = state.get("intent")
         if intent == "help":
             return "help"
@@ -345,7 +348,7 @@ def build_graph():
     
     # From write, check if approval needed
     workflow.add_conditional_edges("write", route_intent)
-    
+
     # Improvement agent approval flow
     def route_improvement(state: AgentState) -> str:
         if state.get("approval_required") and not state.get("approval_decision"):
@@ -356,11 +359,16 @@ def build_graph():
             return "reject_improvements"
         else:
             return END
-    
+
     workflow.add_conditional_edges("improve", route_improvement)
-    
-    # Approval flow
-    workflow.add_conditional_edges("wait_for_approval", route_intent)
+
+    # From wait_for_approval: if still no decision, exit graph (caller shows UI and re-invokes on button press)
+    def route_after_wait(state: AgentState) -> str:
+        if state.get("approval_required") and not state.get("approval_decision"):
+            return END  # Pause: return to caller so Telegram can show Approve/Reject; re-invoke when user clicks
+        return route_intent(state)
+
+    workflow.add_conditional_edges("wait_for_approval", route_after_wait)
     workflow.add_edge("commit", END)
     workflow.add_edge("handle_reject", END)
     workflow.add_edge("apply_improvements", END)
